@@ -1,0 +1,4 @@
+awpy>=2.0.0
+pandas>=2.0
+pyarrow>=14.0
+numpy>=1.24
