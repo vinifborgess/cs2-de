@@ -9,10 +9,10 @@ Outputs (data/gold/):
 - report.md: human reading with tactical recommendation
 """
 from __future__ import annotations
-import math
 from pathlib import Path
 import pandas as pd
 from .config import GOLD_DIR, get_logger
+from .stats import wilson_ci
 
 log = get_logger()
 
@@ -59,16 +59,7 @@ def compute_round_outcomes(kills: pd.DataFrame, rounds: pd.DataFrame) -> pd.Data
     out["first_blood_won"] = out["first_blood_side"] == out["winner"]
     return out
 
-def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson confidence interval — more accurate than normal approximation
-    for proportions with small sample sizes."""
-    if n == 0:
-        return (float("nan"), float("nan"))
-    p = wins / n
-    denom = 1 + z**2 / n
-    center = (p + z**2 / (2 * n)) / denom
-    margin = (z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))) / denom
-    return (max(0.0, center - margin), min(1.0, center + margin))
+_wilson_ci = wilson_ci  # kept for backwards compatibility
 
 
 def compute_first_blood_impact(outcomes: pd.DataFrame) -> pd.DataFrame:
