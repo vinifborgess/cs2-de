@@ -37,8 +37,8 @@ log = get_logger()
 def process_one(demo_path: Path, match_id: str, force: bool) -> bool:
     """raw -> bronze -> silver para uma partida. True se ok, False se pulou."""
     try:
-        bronze = parse_demo_to_bronze(demo_path, match_id, force=force)
-        bronze_to_silver(bronze, match_id, force=force)
+        parse_demo_to_bronze(demo_path, match_id, force=force)
+        bronze_to_silver(match_id, force=force)
         return True
     except Exception as exc:  # noqa: BLE001 — queremos resiliência no lote
         log.error("Falha em '%s' (%s) — pulando. Motivo: %s",
@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
 
     if args.gold_only:
-        silver = load_silver_lake()
+        silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
         run_gold(silver)
         log.info("Concluído em %.1fs.", time.time() - t0)
         return 0
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Gold sempre roda sobre o lake inteiro (poder estatístico vem da agregação).
-    silver = load_silver_lake()
+    silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
     run_gold(silver)
     log.info("Concluído em %.1fs.", time.time() - t0)
     return 0
