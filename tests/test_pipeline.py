@@ -252,6 +252,27 @@ def test_batch_exit_codes_and_bad_demos():
         reset()
 
 
+def test_check_command_exit_codes():
+    import run_pipeline
+    from cs2_pipeline.silver import _silver_path
+    make_match("chk", seed=7)
+    bronze_to_silver("chk", force=True)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 0
+
+    players = _silver_path("players", "chk")  # a 9-player roster is a warning, not an error
+    df = pd.read_parquet(players)
+    df.iloc[:-1].to_parquet(players, index=False)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 0
+    assert run_pipeline.main(["--check", "--match-id", "chk", "--strict"]) == 1
+
+    rounds = _silver_path("rounds", "chk")  # duplicated round numbers are an error
+    df = pd.read_parquet(rounds)
+    df.loc[1, "round_num"] = df.loc[0, "round_num"]
+    df.to_parquet(rounds, index=False)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 1
+    assert run_pipeline.main(["--check", "--match-id", "does-not-exist"]) == 1
+
+
 def test_gold_end_to_end_on_the_lake():
     make_match("syn-win", seed=3, fb_win_prob=1.0)
     make_match("syn-mix", seed=4, fb_win_prob=0.5)
