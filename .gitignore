@@ -1,0 +1,8 @@
+# Data lake (local only). Folder skeleton is kept via .gitkeep.
+data/*/*
+!data/*/.gitkeep
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

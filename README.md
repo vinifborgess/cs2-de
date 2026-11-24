@@ -1,6 +1,6 @@
 # CS2 Tactical Intelligence Pipeline
 
-> Turning Counter-Strike 2 .dem replays into **prescriptive tactical intelligence** for coaches and In-Game Leaders.
+> Turning Counter-Strike 2 .dem replays into a **data product**: clean, documented, queryable data and tactical insight that analysts, coaches, players and fans can explore, customise and replay.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![awpy](https://img.shields.io/badge/awpy-2.x-FF4655)
@@ -16,7 +16,22 @@
 
 The competitive CS2 scene produces **gigabytes of telemetry per match** as `.dem` files. Tick-by-tick binary replays full of Source Engine noise (warm-up, server resets, world-entity deaths). But, raw data doesn't win championships. Coaches and IGLs need *answers*, not logs.
 
-This is an end-to-end **Data Engineering & Analytics pipeline** that parses those replays, enforces data quality, and ships a tactical report - built to scale from Tier 1 down to Tier 3, as long as there's a supply of demos.
+This is an end-to-end **Data Engineering & Analytics pipeline** that parses those replays, enforces data quality, and ships analysis-ready tables and a tactical report - built to scale from Tier 1 down to Tier 3, as long as there's a supply of demos.
+
+## Scope
+
+The goal is a product, not a one-off report. The same lake serves four audiences:
+
+| Audience | What they do with it |
+|---|---|
+| Analysts and coaches | Tactical metrics, opponent prep, team comparisons |
+| Players | Review their own rounds and recurring mistakes |
+| Fans and community | Explore matches and stats |
+| Builders | Query the Parquet lake directly (SQL, DuckDB) |
+
+The flagship use case: pick *all first kills by a team on a map in a tournament*, jump to each one on a **2D replay** synced with player positions, utility and round stats. A replay is rebuilt from tick data (a `.dem` contains game state, not video).
+
+Status: the data layers (Bronze, Silver, Gold) and a first replay prototype exist; the serving layer and the web app are planned (see the Roadmap).
 
 ## The headline question it answers
 
@@ -43,15 +58,15 @@ When your team secures the first kill of the round, they win it 63.3% of the tim
 
 | Layer | Input | Output | What happens |
 |---|---|---|---|
-| 🥉 **Bronze** | `.dem` | raw Parquet | `awpy` parses the binary into raw fact tables (kills, rounds…). All engine noise is preserved as-is. |
-| 🥈 **Silver** | Bronze | typed Parquet | **Data contracts:** strong typing, removal of world/team kills, warm-up & ghost-round filtering, `match_id` standardization. |
+| 🥉 **Bronze** | `.dem` | raw Parquet (13 tables) | `awpy` 3 parses the binary into raw tables: rounds, kills, damages, bomb, smokes, grenades, shots, blinds, item events, economy, roster and player state sampled at `CS2_SNAPSHOT_HZ` (default 4 Hz). Engine noise is preserved as-is. A manifest records the demo hash and parser settings. |
+| 🥈 **Silver** | Bronze | typed Parquet (9 tables) | **Data contracts** (`config.SILVER_SCHEMAS`): `CT`/`T` sides, `round_num` assigned from tick ranges, a per-round clock (`t_s`), teams on every row, world/team kills and warm-up/knife/post-round events removed. |
 | 🥇 **Gold** | Silver lake | report + Parquet | Fact/dimension cross-referencing → tactical metrics. Flagship: **First Blood → round-win impact** with Wilson confidence intervals. |
 
 The Gold layer reads the **entire Silver lake**, not a single match - that's where statistical power comes from. Add demos, and the signal sharpens automatically.
 
 ## Tech stack
 
-`Python 3.10+` · `awpy 2.x` (demo parsing) · `pandas` · `Apache Parquet / PyArrow` (columnar storage) · `DuckDB-ready` query layer
+`Python 3.10+` · `awpy 3.x` (demo parsing, Rust backend) · `polars` (Bronze I/O) · `pandas` · `Apache Parquet / PyArrow` (columnar storage) · `DuckDB-ready` query layer
 
 ## Quickstart
 
@@ -66,31 +81,35 @@ python run_pipeline.py --all
 cat data/gold/report.md
 ```
 
-No demo handy? Validate the install and the analytics logic with the smoke test - it needs no `.dem`:
+No demo handy? Validate the install and the analytics logic with the synthetic tests - they need no `.dem`:
 
 ```bash
-python _test_synthetic.py
+python -m tests.test_pipeline
+# optional: also run end to end on a real demo
+CS2_TEST_DEMO=data/raw/match.dem python -m tests.test_pipeline
 ```
+
+The player-state sampling rate is configurable: `CS2_SNAPSHOT_HZ=8 python run_pipeline.py --all --force`.
 
 ## Project structure
 
 ```text
 cs2-de/
 ├── cs2_pipeline/
-│   ├── config.py        # paths, typed schemas (data contracts), logging
+│   ├── config.py        # paths, Bronze table list, Silver data contracts, logging
 │   ├── utils.py         # polars→pandas bridge, defensive schema helpers
-│   ├── bronze.py        # .dem → raw Parquet via awpy (cached)
-│   ├── silver.py        # cleaning, typing, engine-noise removal
+│   ├── bronze.py        # .dem → raw Parquet via awpy 3, manifest, atomic writes
+│   ├── silver.py        # rounds, clock, teams, noise removal, schema enforcement
 │   └── gold.py          # First Blood analysis + report generation
 ├── run_pipeline.py      # CLI orchestrator, single- and batch-mode
-├── _test_synthetic.py   # smoke test — runs without a real demo
+├── tests/test_pipeline.py  # synthetic tests (no real demo needed)
 ├── requirements.txt
 └── data/                # the lake (git-ignored): raw / bronze / silver / gold
 ```
 
 ## Why this is more than a notebook
 
-- **Idempotent & cached.** Each `.dem` is parsed once (the expensive step); re-runs skip layers that already exist. Re-ingesting 100 demos doesn't re-parse the 99 already done.
+- **Idempotent & cached.** Each `.dem` is parsed once (the expensive step); re-runs skip layers that already exist. Bronze keys the cache on the demo's SHA-256 and the parser settings, so a changed file or setting re-parses. Re-ingesting 100 demos doesn't re-parse the 99 already done. Writes are atomic: an interrupted run never leaves a half-written match.
 - **Data contracts.** Every layer has a typed schema; columns are coerced and validated. A malformed or unusual demo degrades gracefully (logged) instead of crashing.
 - **Batch-resilient.** One corrupt demo is logged and skipped - it never takes down the whole run.
 - **Statistically honest.** Gold reports Wilson 95% confidence intervals and lift over baseline. Small samples are flagged, not disguised as certainty.
@@ -101,10 +120,15 @@ cs2-de/
 - [x] **Bronze** — automated `.dem` parsing with caching
 - [x] **Silver** — data contracts, engine-noise filtering, typed Parquet
 - [x] **Gold** — First Blood → round-win impact (with 95% CI)
-- [ ] Expand Bronze: damage events, bomb plants/defuses, utility usage
+- [x] Expand Bronze: damage, bomb, smokes, grenades, shots, economy and tick-level player state (awpy 3)
+- [ ] Silver for the remaining Bronze tables (grenades, shots, blinds, item events)
+- [ ] Match catalog: event, stage, teams and date per match (a `.dem` does not carry them)
 - [ ] Gold metrics: trade-kill conversion, post-plant win rate, clutch success
-- [ ] Multi-match aggregation dashboard
 - [ ] DuckDB query layer over the Parquet lake
+- [ ] Serving layer: per-round Parquet/JSON sized for the browser
+- [ ] Web app (Vercel): filter by team, map, event and side; list moments (e.g. first kills) and replay them in 2D synced with positions and stats
+- [ ] Clustering of positions and tactics
+- [ ] Multi-match aggregation dashboard
 
 ## License
 
