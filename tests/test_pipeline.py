@@ -5,6 +5,7 @@ real .dem path to also run an end-to-end check on it.
 """
 import os
 import tempfile
+from pathlib import Path
 
 # The data lake location is read at import time: point it at a scratch directory first.
 os.environ["CS2_DATA_DIR"] = tempfile.mkdtemp(prefix="cs2-test-")
@@ -79,12 +80,19 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
                        "official_end_tick": end + 448, "winner_side": SIDE[win_side], "reason": 9,
                        "reason_name": "terrorists_win" if win_side == "T" else "ct_win", "is_knife_round": False})
         n_k = int(rng.integers(3, 7))
+        dead: dict[int, int] = {}  # steamid -> tick of death; nobody dies twice or acts after dying
         for i in range(n_k):
             a_team = fb_team if i == 0 else str(rng.choice(["Alpha", "Bravo"]))
             v_team = "Bravo" if a_team == "Alpha" else "Alpha"
-            a, v = int(rng.choice(teams[a_team])), int(rng.choice(teams[v_team]))
-            kills.append(kill_row(fe + 400 + i * 200, a, v, a_side=SIDE[side_of(a_team, rnd)], v_side=SIDE[side_of(v_team, rnd)]))
-            damages.append({"tick": fe + 400 + i * 200, "attacker_steamid": a, "attacker_name": name_of[a],
+            attackers = [x for x in teams[a_team] if x not in dead]
+            victims = [x for x in teams[v_team] if x not in dead]
+            if not attackers or not victims:
+                continue
+            a, v = int(rng.choice(attackers)), int(rng.choice(victims))
+            k_tick = fe + 400 + i * 200
+            dead[v] = k_tick
+            kills.append(kill_row(k_tick, a, v, a_side=SIDE[side_of(a_team, rnd)], v_side=SIDE[side_of(v_team, rnd)]))
+            damages.append({"tick": k_tick, "attacker_steamid": a, "attacker_name": name_of[a],
                             "attacker_side": SIDE[side_of(a_team, rnd)], "victim_steamid": v, "victim_name": name_of[v],
                             "victim_side": SIDE[side_of(v_team, rnd)], "weapon": "ak47", "dmg_health": 120, "dmg_armor": 0,
                             "hitgroup_name": "head", "health_pre": 100, "health_post": 0})
@@ -106,8 +114,9 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
             econ.append({"round_num": rnd, "side": SIDE[side], "equipment_value": 20000, "buy_type": "full", "n_players": 5})
         for t in (fe - 64, fe, fe + 1000, end):  # first one is freeze time: must be dropped
             for sid, name, team in roster:
+                hp = 0 if (sid in dead and t >= dead[sid]) else 100
                 snaps.append({"tick": t, "steamid": sid, "name": name, "side": SIDE[side_of(team, rnd)],
-                              "x": 10.0, "y": 20.0, "z": 30.0, "yaw": 90.0, "pitch": 0.0, "health": 100,
+                              "x": 10.0, "y": 20.0, "z": 30.0, "yaw": 90.0, "pitch": 0.0, "health": hp,
                               "armor": 100, "active_weapon": "ak47", "has_bomb": False, "is_blinded": False,
                               "is_defusing": False, "money": 4000, "equipment_value": 4000})
         tick = end + 448
@@ -189,6 +198,110 @@ def test_silver_is_idempotent():
     assert path.stat().st_mtime_ns == before
 
 
+def test_silver_rebuilds_when_bronze_or_contract_changes():
+    import cs2_pipeline.silver as silver_mod
+    from cs2_pipeline.silver import _silver_path
+    make_match("syn-stale", seed=5, n_rounds=12)
+    bronze_to_silver("syn-stale", force=True)
+    path = _silver_path("kills", "syn-stale")
+
+    t0 = path.stat().st_mtime_ns
+    bronze_to_silver("syn-stale")
+    assert path.stat().st_mtime_ns == t0, "unchanged Bronze must not trigger a rebuild"
+
+    make_match("syn-stale", seed=6, n_rounds=12)  # Bronze rewritten (e.g. re-parsed)
+    bronze_to_silver("syn-stale")
+    t1 = path.stat().st_mtime_ns
+    assert t1 != t0, "a re-written Bronze must invalidate Silver"
+
+    old = silver_mod.SILVER_VERSION
+    silver_mod.SILVER_VERSION = old + 1  # contract bump
+    try:
+        bronze_to_silver("syn-stale")
+    finally:
+        silver_mod.SILVER_VERSION = old
+    assert path.stat().st_mtime_ns != t1, "a new contract version must invalidate Silver"
+
+
+def test_batch_exit_codes_and_bad_demos():
+    import run_pipeline
+    from cs2_pipeline.config import RAW_DIR
+
+    def reset(*names_and_bytes):
+        for f in RAW_DIR.glob("*.dem"):
+            f.unlink()
+        for name, data in names_and_bytes:
+            (RAW_DIR / name).write_bytes(data)
+
+    real_process, real_gold, real_lake = run_pipeline.process_one, run_pipeline.run_gold, run_pipeline.load_silver_lake
+    run_pipeline.run_gold, run_pipeline.load_silver_lake = (lambda s: None), (lambda t=None: {})
+    try:
+        # Invalid files go through the real parser: skipped, never raised, nothing ingested -> 1.
+        reset(("empty.dem", b""), ("fake.dem", b"not a demo"))
+        assert run_pipeline.main(["--all"]) == 1
+
+        # Only "ok.dem" succeeds: the batch completes but reports the failures -> 2.
+        run_pipeline.process_one = lambda path, match_id, force: path.name == "ok.dem"
+        reset(("empty.dem", b""), ("fake.dem", b"not a demo"), ("ok.dem", b"x"))
+        assert run_pipeline.main(["--all"]) == 2
+
+        # Everything succeeds -> 0.
+        reset(("ok.dem", b"x"))
+        assert run_pipeline.main(["--all"]) == 0
+    finally:
+        run_pipeline.process_one, run_pipeline.run_gold, run_pipeline.load_silver_lake = real_process, real_gold, real_lake
+        reset()
+
+
+def test_check_command_exit_codes():
+    import run_pipeline
+    from cs2_pipeline.silver import _silver_path
+    make_match("chk", seed=7)
+    bronze_to_silver("chk", force=True)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 0
+
+    players = _silver_path("players", "chk")  # a 9-player roster is a warning, not an error
+    df = pd.read_parquet(players)
+    df.iloc[:-1].to_parquet(players, index=False)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 0
+    assert run_pipeline.main(["--check", "--match-id", "chk", "--strict"]) == 1
+
+    rounds = _silver_path("rounds", "chk")  # duplicated round numbers are an error
+    df = pd.read_parquet(rounds)
+    df.loc[1, "round_num"] = df.loc[0, "round_num"]
+    df.to_parquet(rounds, index=False)
+    assert run_pipeline.main(["--check", "--match-id", "chk"]) == 1
+    assert run_pipeline.main(["--check", "--match-id", "does-not-exist"]) == 1
+
+
+def test_failed_quality_checks_quarantine_the_match():
+    import run_pipeline
+    from cs2_pipeline.quality import Check
+    from cs2_pipeline.silver import quarantined
+
+    make_match("qa-good", seed=8, n_rounds=12)
+    make_match("qa-bad", seed=9, n_rounds=12)
+    real_parse, real_checks = run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks
+    run_pipeline.parse_demo_to_bronze = lambda path, mid, force=False: None  # Bronze already written above
+    fail = Check("kills.inside_round", "error", False, "3 kills outside [0, duration]")
+    try:
+        run_pipeline.run_checks = lambda mid: [fail] if mid == "qa-bad" else real_checks(mid)
+        assert run_pipeline.process_one(Path("qa-good.dem"), "qa-good", True) is True
+        assert run_pipeline.process_one(Path("qa-bad.dem"), "qa-bad", True) is False
+        assert "qa-bad" in quarantined() and "qa-good" not in quarantined()
+        assert "kills.inside_round" in quarantined()["qa-bad"][0]
+
+        lake = load_silver_lake(("rounds",))
+        assert "qa-bad" not in set(lake["rounds"]["match_id"]) and "qa-good" in set(lake["rounds"]["match_id"])
+        assert "qa-bad" in set(load_silver_lake(("rounds",), include_quarantined=True)["rounds"]["match_id"])
+
+        run_pipeline.run_checks = real_checks  # fixed data passes the next run: quarantine lifts
+        assert run_pipeline.process_one(Path("qa-bad.dem"), "qa-bad", True) is True
+        assert "qa-bad" not in quarantined()
+    finally:
+        run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks = real_parse, real_checks
+
+
 def test_gold_end_to_end_on_the_lake():
     make_match("syn-win", seed=3, fb_win_prob=1.0)
     make_match("syn-mix", seed=4, fb_win_prob=0.5)
@@ -216,12 +329,6 @@ def test_real_demo_end_to_end():
 
 
 if __name__ == "__main__":
-    failed = 0
-    for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_")):
-        try:
-            fn()
-            print(f"PASS {name}")
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL {name}: {type(exc).__name__}: {exc}")
-    raise SystemExit(1 if failed else 0)
+    from tests._runner import run
+
+    raise SystemExit(run(globals()))

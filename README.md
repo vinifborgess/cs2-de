@@ -2,7 +2,7 @@
 
 > Turning Counter-Strike 2 .dem replays into a **data product**: clean, documented, queryable data and tactical insight that analysts, coaches, players and fans can explore, customise and replay.
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![awpy](https://img.shields.io/badge/awpy-2.x-FF4655)
 ![pandas](https://img.shields.io/badge/pandas-150458?logo=pandas&logoColor=white)
 ![Parquet](https://img.shields.io/badge/Apache_Parquet-50ABF1?logo=apacheparquet&logoColor=white)
@@ -66,7 +66,7 @@ The Gold layer reads the **entire Silver lake**, not a single match - that's whe
 
 ## Tech stack
 
-`Python 3.10+` · `awpy 3.x` (demo parsing, Rust backend) · `polars` (Bronze I/O) · `pandas` · `Apache Parquet / PyArrow` (columnar storage) · `DuckDB-ready` query layer
+`Python 3.11+` · `awpy 3.x` (demo parsing, Rust backend) · `polars` (Bronze I/O) · `pandas` · `Apache Parquet / PyArrow` (columnar storage) · `DuckDB-ready` query layer
 
 ## Quickstart
 
@@ -84,9 +84,9 @@ cat data/gold/report.md
 No demo handy? Validate the install and the analytics logic with the synthetic tests - they need no `.dem`:
 
 ```bash
-python -m tests.test_pipeline
+python -m tests
 # optional: also run end to end on a real demo
-CS2_TEST_DEMO=data/raw/match.dem python -m tests.test_pipeline
+CS2_TEST_DEMO=data/raw/match.dem python -m tests
 ```
 
 The player-state sampling rate is configurable: `CS2_SNAPSHOT_HZ=8 python run_pipeline.py --all --force`.

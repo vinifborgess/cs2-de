@@ -100,7 +100,8 @@ def write_bronze_tables(match_id: str, tables: dict[str, pl.DataFrame], meta: di
         for name, df in tables.items():
             df.write_parquet(tmp / f"{name}.parquet", compression="zstd")
             rows[name] = df.height
-        manifest = {"manifest_version": MANIFEST_VERSION, "match_id": match_id, **meta, "rows": rows}
+        manifest = {"manifest_version": MANIFEST_VERSION, "match_id": match_id, **meta,
+                    "written_at_ns": time.time_ns(), "rows": rows}
         (tmp / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         shutil.rmtree(final, ignore_errors=True)
         tmp.rename(final)

@@ -14,13 +14,15 @@ Layout: ``data/silver/<table>/match_<match_id>.parquet``.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from .bronze import read_bronze, read_manifest
-from .config import SILVER_DIR, SILVER_SCHEMAS, SILVER_TABLES, get_logger
+from .config import SILVER_DIR, SILVER_SCHEMAS, SILVER_TABLES, SILVER_VERSION, get_logger
 from .utils import coerce_schema, missing_columns
 
 log = get_logger()
@@ -33,6 +35,59 @@ def _silver_path(table: str, match_id: str) -> Path:
     directory = SILVER_DIR / table
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"match_{match_id}.parquet"
+
+
+def _manifest_path(match_id: str) -> Path:
+    directory = SILVER_DIR / "_manifests"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{match_id}.json"
+
+
+def _bronze_fingerprint(match_id: str) -> dict:
+    """What this match's Bronze currently is: demo hash, sampling rate and write stamp."""
+    m = read_manifest(match_id) or {}
+    return {k: m.get(k) for k in ("demo_sha256", "snapshot_hz", "written_at_ns")}
+
+
+def _is_fresh(match_id: str, targets: dict[str, Path]) -> bool:
+    """True when Silver was built from the current Bronze with the current contract."""
+    path = _manifest_path(match_id)
+    if not path.exists() or not all(p.exists() for p in targets.values()):
+        return False
+    try:
+        built = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return (built.get("silver_version") == SILVER_VERSION
+            and built.get("bronze") == _bronze_fingerprint(match_id))
+
+
+def _quarantine_path(match_id: str) -> Path:
+    directory = SILVER_DIR / "_quarantine"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{match_id}.json"
+
+
+def quarantine(match_id: str, reasons: list[str]) -> None:
+    """Keep a match out of the lake (and so out of Gold) and record why."""
+    _quarantine_path(match_id).write_text(json.dumps({
+        "match_id": match_id, "reasons": reasons,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }, indent=2), encoding="utf-8")
+
+
+def release(match_id: str) -> bool:
+    """Lift a quarantine. Returns True if the match was quarantined."""
+    path = _quarantine_path(match_id)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
+def quarantined() -> dict[str, list[str]]:
+    """{match_id: reasons} for every quarantined match."""
+    return {p.stem: json.loads(p.read_text(encoding="utf-8")).get("reasons", [])
+            for p in sorted((SILVER_DIR / "_quarantine").glob("*.json"))}
 
 
 # --- helpers ------------------------------------------------------------------
@@ -221,8 +276,8 @@ def build_matches(rounds: pd.DataFrame, header: pd.DataFrame, manifest: dict | N
 def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.DataFrame]:
     """Build the Silver tables for one match from its Bronze tables. Idempotent."""
     targets = {t: _silver_path(t, match_id) for t in SILVER_TABLES}
-    if not force and all(p.exists() for p in targets.values()):
-        log.info("Silver already exists for '%s' - skipping cleaning.", match_id)
+    if not force and _is_fresh(match_id, targets):
+        log.info("Silver is up to date for '%s' - skipping cleaning.", match_id)
         return {t: pd.read_parquet(p) for t, p in targets.items()}
 
     header = read_bronze(match_id, "header")
@@ -249,14 +304,27 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
     }
     for name, df in tables.items():
         df.to_parquet(targets[name], engine="pyarrow", index=False)
+    _manifest_path(match_id).write_text(json.dumps({
+        "silver_version": SILVER_VERSION,
+        "bronze": _bronze_fingerprint(match_id),
+        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rows": {n: len(d) for n, d in tables.items()},
+    }, indent=2), encoding="utf-8")
     log.info("Silver[%s]: %s", match_id, ", ".join(f"{n}={len(d)}" for n, d in tables.items()))
     return tables
 
 
-def load_silver_lake(tables: tuple[str, ...] | None = None) -> dict[str, pd.DataFrame]:
-    """Read and concatenate Silver data across all matches (all tables by default)."""
+def load_silver_lake(tables: tuple[str, ...] | None = None, *,
+                     include_quarantined: bool = False) -> dict[str, pd.DataFrame]:
+    """Read and concatenate Silver data across matches (all tables by default).
+
+    Quarantined matches (failed data-quality errors) are left out unless asked for.
+    """
+    skip = set() if include_quarantined else set(quarantined())
+
     def _read_all(table: str) -> pd.DataFrame:
-        files = sorted((SILVER_DIR / table).glob("match_*.parquet"))
+        files = [f for f in sorted((SILVER_DIR / table).glob("match_*.parquet"))
+                 if f.stem.removeprefix("match_") not in skip]
         if not files:
             return pd.DataFrame()
         return pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
