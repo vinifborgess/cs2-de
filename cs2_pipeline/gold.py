@@ -261,7 +261,8 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
     if skipped:
         lines += ["## Excluded matches", "", *[f"- `{m}`: {why}" for m, why in sorted(skipped.items())], ""]
     lines += ["## How to read this",
-              "- `field` baselines compare a team with every other team in the same map/side slice.",
+              "- `field` baselines compare a team with teams that never played it, in the same map/side slice;",
+              "  without such teams a rate is shown but never called a finding.",
               "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
               "- ADR and KAST are weighted by rounds played across matches.", ""]
     return "\n".join(lines)

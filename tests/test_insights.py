@@ -81,12 +81,32 @@ def test_field_baseline_is_the_pooled_rate_of_the_other_teams():
     assert r["baseline_source"] == "field"
 
 
-def test_field_baseline_falls_back_when_there_is_no_other_team():
+def test_head_to_head_alone_never_produces_a_field_finding():
+    # Both teams full-buy every round and X wins 18 of 24. The opponent's full-buy win rate is
+    # just 1 - X's (same rounds), so comparing with it would flag X as "above the field".
+    m = compute_team_metrics(fact_round(duel_match(["X"] * 18 + ["Y"] * 6)))
+    for team in ("X", "Y"):
+        r = pick(m, team, "full_buy_win")
+        assert r["baseline_source"] == "none" and pd.isna(r["baseline"]) and r["verdict"] == "inconclusive"
+    assert not findings(m)["metric"].isin(["full_buy_win", "first_kill_conversion", "plant_rate"]).any()
+    assert pick(m, "X", "round_win")["baseline_source"] == "fixed"        # fixed baselines are unaffected
+
+
+def test_opponents_of_the_team_are_excluded_from_its_field_baseline():
+    # X plays Y (same rounds, anti-correlated); Z plays W elsewhere. Only Z/W form X's field.
+    rows = duel_match(["X"] * 8 + ["Y"] * 4, match_id="xy", ct_first="X", t_first="Y")
+    rows += duel_match(["Z"] * 6 + ["W"] * 6, match_id="zw", ct_first="Z", t_first="W")
+    m = compute_team_metrics(fact_round(rows))
+    r = pick(m, "X", "full_buy_win", "de_x", "CT")
+    assert r["baseline_source"] == "field" and math.isclose(r["baseline"], 6 / 12)   # Z (and W) full-buy rounds only
+
+
+def test_field_baseline_is_none_when_there_is_no_other_team():
     rows = [{"match_id": "m", "map_name": "de_x", "round_num": i, "ct_team": "X", "t_team": "OTHER",
              "winner_team": "X", "fb_team": "X"} for i in range(1, 13)]
     m = compute_team_metrics(fact_round(rows))
     r = pick(m, "X", "first_kill_conversion", "de_x", "CT")
-    assert r["baseline"] == 0.5 and r["baseline_source"] == "fallback"   # nobody else on CT to compare with
+    assert pd.isna(r["baseline"]) and r["baseline_source"] == "none" and r["verdict"] == "inconclusive"
 
 
 def test_pistol_rounds_are_rounds_1_and_13_only():

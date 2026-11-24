@@ -7,9 +7,11 @@ label and a verdict. Nothing is called a finding unless the interval clears its 
 Baselines
 * ``fixed``  - 0.5. Used where a coin flip is the honest null (a round, a pistol round,
                an opening duel: exactly one of two teams wins each).
-* ``field``  - the pooled rate of every OTHER team in the same map/side slice (leave-one-out),
-               so a team is compared with the rest of the data, not with itself. With no
-               other team in the slice it falls back to 0.5 and says so in ``baseline_source``.
+* ``field``  - the pooled rate of the teams that are neither this team nor one of its opponents,
+               in the same map/side slice. An opponent's rows are the same rounds seen from the
+               other side (its win rate is 1 minus ours), so comparing with them would flag any
+               team that simply won more rounds. With no such team the baseline is ``none``: the
+               rate is still reported but its verdict is always "inconclusive".
 """
 from __future__ import annotations
 
@@ -93,9 +95,15 @@ def compute_team_metrics(fact_round: pd.DataFrame) -> pd.DataFrame:
             if spec.baseline == "field":
                 tot = (g.groupby(keys)[["successes", "n"]].transform("sum") if keys
                        else pd.DataFrame({"successes": g["successes"].sum(), "n": g["n"].sum()}, index=g.index))
-                o_s, o_n = tot["successes"] - g["successes"], tot["n"] - g["n"]
-                g["baseline"] = (o_s / o_n).where(o_n > 0, 0.5)
-                g["baseline_source"] = pd.Series("field", index=g.index).where(o_n > 0, "fallback")
+                # Rows where the opponent is this team: the same rounds from the other side.
+                vs = (sub.groupby(["opponent"] + keys).agg(vs_s=("ok", "sum"), vs_n=("ok", "size"))
+                      .reset_index().rename(columns={"opponent": "team"}))
+                g = g.merge(vs, on=["team"] + keys, how="left").fillna({"vs_s": 0, "vs_n": 0})
+                o_s = tot["successes"].to_numpy() - g["successes"] - g["vs_s"]
+                o_n = tot["n"].to_numpy() - g["n"] - g["vs_n"]
+                g["baseline"] = (o_s / o_n).where(o_n > 0)
+                g["baseline_source"] = pd.Series("field", index=g.index).where(o_n > 0, "none")
+                g = g.drop(columns=["vs_s", "vs_n"])
             else:
                 g["baseline"], g["baseline_source"] = 0.5, "fixed"
             for col in ("map_name", "side"):
@@ -106,9 +114,12 @@ def compute_team_metrics(fact_round: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=METRIC_COLUMNS)
     m = pd.concat(rows, ignore_index=True)
-    sm = [summarize_rate(int(s), int(n), float(b)) for s, n, b in zip(m["successes"], m["n"], m["baseline"])]
+    sm = [summarize_rate(int(s), int(n), 0.5 if pd.isna(b) else float(b))
+          for s, n, b in zip(m["successes"], m["n"], m["baseline"])]
     m["rate"], m["ci_low"], m["ci_high"] = [x.rate for x in sm], [x.ci_low for x in sm], [x.ci_high for x in sm]
     m["lift"], m["confidence"], m["verdict"] = [x.lift for x in sm], [x.confidence for x in sm], [x.verdict for x in sm]
+    no_ref = m["baseline_source"] == "none"          # nothing to compare with: never a finding
+    m.loc[no_ref, ["lift", "verdict"]] = [float("nan"), "inconclusive"]
     return m[METRIC_COLUMNS].sort_values(["team", "metric", "map_name", "side"]).reset_index(drop=True)
 
 
