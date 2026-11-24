@@ -18,6 +18,9 @@ python run_pipeline.py --all --force
 
 Robustez: no modo lote, uma partida que falhar (demo corrompido, POV demo,
 etc.) é logada e PULADA — não derruba o batch inteiro.
+
+Códigos de saída: 0 = tudo certo; 1 = nenhuma partida ingerida ou erro de uso;
+2 = lote concluído, mas alguma partida falhou (o Gold foi gerado com as que deram certo).
 """
 from __future__ import annotations
 
@@ -79,8 +82,12 @@ def main(argv: list[str] | None = None) -> int:
         ap.print_help()
         return 1
 
-    ok = sum(process_one(p, mid, args.force) for p, mid in jobs)
+    results = {p.name: process_one(p, mid, args.force) for p, mid in jobs}
+    ok = sum(results.values())
+    failed = [name for name, done in results.items() if not done]
     log.info("Ingestão: %d/%d partidas OK.", ok, len(jobs))
+    if failed:
+        log.warning("Falharam: %s", ", ".join(failed))
 
     if ok == 0:
         log.error("Nenhuma partida ingerida — Gold não será recalculado.")
@@ -90,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
     run_gold(silver)
     log.info("Concluído em %.1fs.", time.time() - t0)
-    return 0
+    return 2 if failed else 0
 
 
 if __name__ == "__main__":

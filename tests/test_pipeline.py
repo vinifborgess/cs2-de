@@ -214,6 +214,36 @@ def test_silver_rebuilds_when_bronze_or_contract_changes():
     assert path.stat().st_mtime_ns != t1, "a new contract version must invalidate Silver"
 
 
+def test_batch_exit_codes_and_bad_demos():
+    import run_pipeline
+    from cs2_pipeline.config import RAW_DIR
+
+    def reset(*names_and_bytes):
+        for f in RAW_DIR.glob("*.dem"):
+            f.unlink()
+        for name, data in names_and_bytes:
+            (RAW_DIR / name).write_bytes(data)
+
+    real_process, real_gold, real_lake = run_pipeline.process_one, run_pipeline.run_gold, run_pipeline.load_silver_lake
+    run_pipeline.run_gold, run_pipeline.load_silver_lake = (lambda s: None), (lambda t=None: {})
+    try:
+        # Invalid files go through the real parser: skipped, never raised, nothing ingested -> 1.
+        reset(("empty.dem", b""), ("fake.dem", b"not a demo"))
+        assert run_pipeline.main(["--all"]) == 1
+
+        # Only "ok.dem" succeeds: the batch completes but reports the failures -> 2.
+        run_pipeline.process_one = lambda path, match_id, force: path.name == "ok.dem"
+        reset(("empty.dem", b""), ("fake.dem", b"not a demo"), ("ok.dem", b"x"))
+        assert run_pipeline.main(["--all"]) == 2
+
+        # Everything succeeds -> 0.
+        reset(("ok.dem", b"x"))
+        assert run_pipeline.main(["--all"]) == 0
+    finally:
+        run_pipeline.process_one, run_pipeline.run_gold, run_pipeline.load_silver_lake = real_process, real_gold, real_lake
+        reset()
+
+
 def test_gold_end_to_end_on_the_lake():
     make_match("syn-win", seed=3, fb_win_prob=1.0)
     make_match("syn-mix", seed=4, fb_win_prob=0.5)
