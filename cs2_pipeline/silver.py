@@ -143,7 +143,10 @@ def _finish(df: pd.DataFrame, table: str, match_id: str) -> pd.DataFrame:
 # --- table builders -----------------------------------------------------------
 
 def clean_players(raw: pd.DataFrame, match_id: str) -> pd.DataFrame:
-    df = raw[raw["steamid"].astype("string") != _PSEUDO_PLAYER].dropna(subset=["team_clan_name"])
+    df = raw[raw["steamid"].astype("string") != _PSEUDO_PLAYER].copy()
+    # A blank clan name is a missing one: otherwise "" would be treated as a team.
+    df["team_clan_name"] = df["team_clan_name"].astype("string").str.strip().replace("", pd.NA)
+    df = df.dropna(subset=["team_clan_name"])
     df = df.rename(columns={"team_clan_name": "team"})
     return _finish(df.drop_duplicates("steamid"), "players", match_id)
 

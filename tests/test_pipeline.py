@@ -155,6 +155,14 @@ def test_normalize_side():
     assert out.tolist()[:4] == ["T", "CT", "CT", "T"] and out.isna().tolist()[4:] == [True, True]
 
 
+def test_blank_clan_names_are_missing_not_a_team():
+    from cs2_pipeline.silver import clean_players
+    raw = pd.DataFrame({"steamid": ["0", "1", "2", "3", "4"], "name": ["CSTV", "a", "b", "c", "d"],
+                        "team_clan_name": [None, "  ", "", "Alpha ", None]})
+    out = clean_players(raw, "m")
+    assert out["steamid"].tolist() == ["3"] and out["team"].tolist() == ["Alpha"]
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})
