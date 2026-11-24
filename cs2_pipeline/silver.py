@@ -377,3 +377,15 @@ def load_silver_lake(tables: tuple[str, ...] | None = None, *,
         return pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
 
     return {t: _read_all(t) for t in (tables or SILVER_TABLES)}
+
+
+def list_matches(include_quarantined: bool = False) -> list[str]:
+    """Match ids that have Silver data, quarantined ones excluded unless asked for."""
+    skip = set() if include_quarantined else set(quarantined())
+    ids = (f.stem.removeprefix("match_") for f in (SILVER_DIR / "matches").glob("match_*.parquet"))
+    return sorted(i for i in ids if i not in skip)
+
+
+def read_match(match_id: str, tables: tuple[str, ...] | None = None) -> dict[str, pd.DataFrame]:
+    """Read the Silver tables of ONE match (all by default)."""
+    return {t: pd.read_parquet(_silver_path(t, match_id)) for t in (tables or SILVER_TABLES)}

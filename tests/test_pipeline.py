@@ -268,6 +268,21 @@ def test_silver_contracts_noise_and_sides():
     assert s["positions"]["steamid"].str.len().eq(17).all()
 
 
+def test_list_matches_and_read_match_respect_quarantine():
+    from cs2_pipeline.silver import list_matches, quarantine, read_match, release
+    make_match("syn-list", seed=31, n_rounds=12)
+    bronze_to_silver("syn-list", force=True)
+    assert "syn-list" in list_matches()
+    t = read_match("syn-list", ("rounds", "kills"))
+    assert set(t) == {"rounds", "kills"} and len(t["rounds"]) == 12
+    assert set(read_match("syn-list")) == set(SILVER_SCHEMAS)
+    quarantine("syn-list", ["test"])
+    try:
+        assert "syn-list" not in list_matches() and "syn-list" in list_matches(include_quarantined=True)
+    finally:
+        release("syn-list")
+
+
 def test_silver_is_idempotent():
     make_match("syn-idem", seed=2)
     bronze_to_silver("syn-idem", force=True)
