@@ -206,6 +206,29 @@ def test_oversized_side_group_is_not_treated_as_a_team():
     assert out["team_clan_name"].isna().all()
 
 
+def test_restarted_rounds_keep_only_the_round_that_was_played_out():
+    from cs2_pipeline.silver import clean_rounds_base
+    raw = pd.DataFrame({
+        "round_num": [1, 1, 2], "start_tick": [1000, 5000, 9000], "freeze_end_tick": [1500, 5500, 9500],
+        "end_tick": [2000, 8000, 12000], "winner_side": ["terrorist", "counter-terrorist", "terrorist"],
+        "is_knife_round": [False, False, False], "reason": [1, 1, 1], "reason_name": ["a", "b", "c"]})
+    out = clean_rounds_base(raw)
+    assert out["round_num"].tolist() == [1, 2] and out["start_tick"].tolist() == [5000, 9000]
+    assert out["winner"].tolist() == ["CT", "T"]
+
+
+def test_restarted_round_does_not_break_a_whole_match():
+    make_match("syn-restart", seed=13)
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / "syn-restart" / "rounds.parquet"
+    r = pl.read_parquet(path)
+    first = r.filter(pl.col("round_num") == 1)
+    ghost = first.with_columns(*(pl.col(c) - 3 for c in ("start_tick", "freeze_end_tick", "end_tick") if c in first.columns))
+    pl.concat([ghost, r]).sort("start_tick").write_parquet(path)
+    s = bronze_to_silver("syn-restart", force=True)
+    assert len(s["rounds"]) == 24 and s["rounds"]["round_num"].is_unique
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})

@@ -194,7 +194,14 @@ def clean_rounds_base(raw: pd.DataFrame) -> pd.DataFrame:
         columns={"freeze_end_tick": "freeze_end", "reason_name": "reason"})
     df["winner"] = normalize_side(df["winner_side"])
     keep = (~df["is_knife_round"].fillna(False)) & (df["start_tick"] > 0) & df["winner"].isin(["CT", "T"])
-    return df[keep].sort_values("round_num").reset_index(drop=True)
+    df = df[keep].sort_values("start_tick")
+    # A restart (mp_restartgame, a replayed round) leaves two rows for the same round
+    # number. The last one is the round that was actually played out.
+    dup = df["round_num"].duplicated(keep="last")
+    if dup.any():
+        log.warning("silver.rounds: dropped %d superseded round(s) %s (restarted rounds)",
+                    int(dup.sum()), sorted(df.loc[dup, "round_num"].tolist()))
+    return df[~dup].sort_values("round_num").reset_index(drop=True)
 
 
 def clean_positions(snap: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
