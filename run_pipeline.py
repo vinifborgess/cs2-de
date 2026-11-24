@@ -35,7 +35,7 @@ from pathlib import Path
 
 from cs2_pipeline.config import RAW_DIR, get_logger
 from cs2_pipeline.bronze import parse_demo_to_bronze
-from cs2_pipeline.silver import bronze_to_silver, load_silver_lake
+from cs2_pipeline.silver import bronze_to_silver, load_silver_lake, quarantine, release
 from cs2_pipeline.gold import run_gold
 from cs2_pipeline.quality import list_matches, run_checks, summarize
 
@@ -47,6 +47,18 @@ def process_one(demo_path: Path, match_id: str, force: bool) -> bool:
     try:
         parse_demo_to_bronze(demo_path, match_id, force=force)
         bronze_to_silver(match_id, force=force)
+        checks = run_checks(match_id)
+        errors = [str(c) for c in checks if not c.ok and c.level == "error"]
+        if errors:
+            quarantine(match_id, errors)
+            log.error("'%s' reprovada na checagem de qualidade e posta em quarentena "
+                      "(fora do Gold): %s", match_id, "; ".join(errors))
+            return False
+        if release(match_id):
+            log.info("'%s' passou nas checagens: quarentena removida.", match_id)
+        for c in checks:
+            if not c.ok:
+                log.warning("Qualidade[%s]: %s", match_id, c)
         return True
     except Exception as exc:  # noqa: BLE001 — queremos resiliência no lote
         log.error("Falha em '%s' (%s) — pulando. Motivo: %s",

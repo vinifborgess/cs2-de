@@ -62,6 +62,34 @@ def _is_fresh(match_id: str, targets: dict[str, Path]) -> bool:
             and built.get("bronze") == _bronze_fingerprint(match_id))
 
 
+def _quarantine_path(match_id: str) -> Path:
+    directory = SILVER_DIR / "_quarantine"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{match_id}.json"
+
+
+def quarantine(match_id: str, reasons: list[str]) -> None:
+    """Keep a match out of the lake (and so out of Gold) and record why."""
+    _quarantine_path(match_id).write_text(json.dumps({
+        "match_id": match_id, "reasons": reasons,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }, indent=2), encoding="utf-8")
+
+
+def release(match_id: str) -> bool:
+    """Lift a quarantine. Returns True if the match was quarantined."""
+    path = _quarantine_path(match_id)
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
+def quarantined() -> dict[str, list[str]]:
+    """{match_id: reasons} for every quarantined match."""
+    return {p.stem: json.loads(p.read_text(encoding="utf-8")).get("reasons", [])
+            for p in sorted((SILVER_DIR / "_quarantine").glob("*.json"))}
+
+
 # --- helpers ------------------------------------------------------------------
 
 def normalize_side(s: pd.Series) -> pd.Series:
@@ -286,10 +314,17 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
     return tables
 
 
-def load_silver_lake(tables: tuple[str, ...] | None = None) -> dict[str, pd.DataFrame]:
-    """Read and concatenate Silver data across all matches (all tables by default)."""
+def load_silver_lake(tables: tuple[str, ...] | None = None, *,
+                     include_quarantined: bool = False) -> dict[str, pd.DataFrame]:
+    """Read and concatenate Silver data across matches (all tables by default).
+
+    Quarantined matches (failed data-quality errors) are left out unless asked for.
+    """
+    skip = set() if include_quarantined else set(quarantined())
+
     def _read_all(table: str) -> pd.DataFrame:
-        files = sorted((SILVER_DIR / table).glob("match_*.parquet"))
+        files = [f for f in sorted((SILVER_DIR / table).glob("match_*.parquet"))
+                 if f.stem.removeprefix("match_") not in skip]
         if not files:
             return pd.DataFrame()
         return pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)

@@ -5,6 +5,7 @@ real .dem path to also run an end-to-end check on it.
 """
 import os
 import tempfile
+from pathlib import Path
 
 # The data lake location is read at import time: point it at a scratch directory first.
 os.environ["CS2_DATA_DIR"] = tempfile.mkdtemp(prefix="cs2-test-")
@@ -271,6 +272,34 @@ def test_check_command_exit_codes():
     df.to_parquet(rounds, index=False)
     assert run_pipeline.main(["--check", "--match-id", "chk"]) == 1
     assert run_pipeline.main(["--check", "--match-id", "does-not-exist"]) == 1
+
+
+def test_failed_quality_checks_quarantine_the_match():
+    import run_pipeline
+    from cs2_pipeline.quality import Check
+    from cs2_pipeline.silver import quarantined
+
+    make_match("qa-good", seed=8, n_rounds=12)
+    make_match("qa-bad", seed=9, n_rounds=12)
+    real_parse, real_checks = run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks
+    run_pipeline.parse_demo_to_bronze = lambda path, mid, force=False: None  # Bronze already written above
+    fail = Check("kills.inside_round", "error", False, "3 kills outside [0, duration]")
+    try:
+        run_pipeline.run_checks = lambda mid: [fail] if mid == "qa-bad" else real_checks(mid)
+        assert run_pipeline.process_one(Path("qa-good.dem"), "qa-good", True) is True
+        assert run_pipeline.process_one(Path("qa-bad.dem"), "qa-bad", True) is False
+        assert "qa-bad" in quarantined() and "qa-good" not in quarantined()
+        assert "kills.inside_round" in quarantined()["qa-bad"][0]
+
+        lake = load_silver_lake(("rounds",))
+        assert "qa-bad" not in set(lake["rounds"]["match_id"]) and "qa-good" in set(lake["rounds"]["match_id"])
+        assert "qa-bad" in set(load_silver_lake(("rounds",), include_quarantined=True)["rounds"]["match_id"])
+
+        run_pipeline.run_checks = real_checks  # fixed data passes the next run: quarantine lifts
+        assert run_pipeline.process_one(Path("qa-bad.dem"), "qa-bad", True) is True
+        assert "qa-bad" not in quarantined()
+    finally:
+        run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks = real_parse, real_checks
 
 
 def test_gold_end_to_end_on_the_lake():
