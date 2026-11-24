@@ -108,6 +108,10 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
 
 SILVER_TABLES: tuple[str, ...] = tuple(SILVER_SCHEMAS)
 
+# Bump whenever Silver logic or contracts change in a way that alters its output:
+# every cached Silver match built with an older version is rebuilt on the next run.
+SILVER_VERSION: int = 1
+
 def get_logger(name: str = "cs2") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:

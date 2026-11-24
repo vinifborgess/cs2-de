@@ -189,6 +189,31 @@ def test_silver_is_idempotent():
     assert path.stat().st_mtime_ns == before
 
 
+def test_silver_rebuilds_when_bronze_or_contract_changes():
+    import cs2_pipeline.silver as silver_mod
+    from cs2_pipeline.silver import _silver_path
+    make_match("syn-stale", seed=5, n_rounds=12)
+    bronze_to_silver("syn-stale", force=True)
+    path = _silver_path("kills", "syn-stale")
+
+    t0 = path.stat().st_mtime_ns
+    bronze_to_silver("syn-stale")
+    assert path.stat().st_mtime_ns == t0, "unchanged Bronze must not trigger a rebuild"
+
+    make_match("syn-stale", seed=6, n_rounds=12)  # Bronze rewritten (e.g. re-parsed)
+    bronze_to_silver("syn-stale")
+    t1 = path.stat().st_mtime_ns
+    assert t1 != t0, "a re-written Bronze must invalidate Silver"
+
+    old = silver_mod.SILVER_VERSION
+    silver_mod.SILVER_VERSION = old + 1  # contract bump
+    try:
+        bronze_to_silver("syn-stale")
+    finally:
+        silver_mod.SILVER_VERSION = old
+    assert path.stat().st_mtime_ns != t1, "a new contract version must invalidate Silver"
+
+
 def test_gold_end_to_end_on_the_lake():
     make_match("syn-win", seed=3, fb_win_prob=1.0)
     make_match("syn-mix", seed=4, fb_win_prob=0.5)
