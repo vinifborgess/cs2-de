@@ -79,12 +79,19 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
                        "official_end_tick": end + 448, "winner_side": SIDE[win_side], "reason": 9,
                        "reason_name": "terrorists_win" if win_side == "T" else "ct_win", "is_knife_round": False})
         n_k = int(rng.integers(3, 7))
+        dead: dict[int, int] = {}  # steamid -> tick of death; nobody dies twice or acts after dying
         for i in range(n_k):
             a_team = fb_team if i == 0 else str(rng.choice(["Alpha", "Bravo"]))
             v_team = "Bravo" if a_team == "Alpha" else "Alpha"
-            a, v = int(rng.choice(teams[a_team])), int(rng.choice(teams[v_team]))
-            kills.append(kill_row(fe + 400 + i * 200, a, v, a_side=SIDE[side_of(a_team, rnd)], v_side=SIDE[side_of(v_team, rnd)]))
-            damages.append({"tick": fe + 400 + i * 200, "attacker_steamid": a, "attacker_name": name_of[a],
+            attackers = [x for x in teams[a_team] if x not in dead]
+            victims = [x for x in teams[v_team] if x not in dead]
+            if not attackers or not victims:
+                continue
+            a, v = int(rng.choice(attackers)), int(rng.choice(victims))
+            k_tick = fe + 400 + i * 200
+            dead[v] = k_tick
+            kills.append(kill_row(k_tick, a, v, a_side=SIDE[side_of(a_team, rnd)], v_side=SIDE[side_of(v_team, rnd)]))
+            damages.append({"tick": k_tick, "attacker_steamid": a, "attacker_name": name_of[a],
                             "attacker_side": SIDE[side_of(a_team, rnd)], "victim_steamid": v, "victim_name": name_of[v],
                             "victim_side": SIDE[side_of(v_team, rnd)], "weapon": "ak47", "dmg_health": 120, "dmg_armor": 0,
                             "hitgroup_name": "head", "health_pre": 100, "health_post": 0})
@@ -106,8 +113,9 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
             econ.append({"round_num": rnd, "side": SIDE[side], "equipment_value": 20000, "buy_type": "full", "n_players": 5})
         for t in (fe - 64, fe, fe + 1000, end):  # first one is freeze time: must be dropped
             for sid, name, team in roster:
+                hp = 0 if (sid in dead and t >= dead[sid]) else 100
                 snaps.append({"tick": t, "steamid": sid, "name": name, "side": SIDE[side_of(team, rnd)],
-                              "x": 10.0, "y": 20.0, "z": 30.0, "yaw": 90.0, "pitch": 0.0, "health": 100,
+                              "x": 10.0, "y": 20.0, "z": 30.0, "yaw": 90.0, "pitch": 0.0, "health": hp,
                               "armor": 100, "active_weapon": "ak47", "has_bomb": False, "is_blinded": False,
                               "is_defusing": False, "money": 4000, "equipment_value": 4000})
         tick = end + 448
