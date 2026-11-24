@@ -35,6 +35,11 @@ def _c(name: str, level: str, ok: bool, detail: str = "") -> Check:
     return Check(name, level, bool(ok), detail)
 
 
+def _durations(rounds: pd.DataFrame) -> pd.Series:
+    """round_num -> duration, tolerant of duplicated round numbers (reported elsewhere)."""
+    return rounds.drop_duplicates("round_num").set_index("round_num")["duration_s"]
+
+
 def _rounds_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     r, m, p = t["rounds"], t["matches"], t["players"]
     out: list[Check] = []
@@ -74,7 +79,7 @@ def _kills_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("kills.victim_dies_once_per_round", "error", twice == 0, f"{twice} players killed twice in one round"))
     per_round = k.groupby("round_num").size()
     out.append(_c("kills.at_most_10_per_round", "error", (per_round <= 10).all(), f"max {per_round.max()}"))
-    dur = k["round_num"].map(r.set_index("round_num")["duration_s"])
+    dur = k["round_num"].map(_durations(r))
     off = (~k["t_s"].between(0, dur + 1)).sum()
     out.append(_c("kills.inside_round", "error", off == 0, f"{off} kills outside [0, duration]"))
     mixed = (k["attacker_team"].isna() | k["victim_team"].isna() | (k["attacker_team"] == k["victim_team"])).sum()
@@ -106,7 +111,7 @@ def _positions_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("positions.sides_balanced", "warning", balanced >= 0.99, f"only {balanced:.1%} of snapshots are 5 CT vs 5 T"))
     out.append(_c("positions.health_range", "error", p["health"].between(0, 100).all(), "health outside 0-100"))
     out.append(_c("positions.finite_coords", "error", np.isfinite(p[["x", "y", "z"]].to_numpy(dtype="float64")).all(), "NaN or infinite coordinates"))
-    dur = p["round_num"].map(r.set_index("round_num")["duration_s"])
+    dur = p["round_num"].map(_durations(r))
     off = (~p["t_s"].between(0, dur + 1)).sum()
     out.append(_c("positions.inside_round", "error", off == 0, f"{off} samples outside [0, duration]"))
     return out
@@ -136,7 +141,14 @@ def check_match(tables: dict[str, pd.DataFrame]) -> list[Check]:
     missing = [n for n in SILVER_TABLES if n not in tables]
     if missing:
         return [_c("silver.tables_present", "error", False, f"missing tables: {missing}")]
-    return _rounds_checks(tables) + _kills_checks(tables) + _positions_checks(tables) + _events_checks(tables)
+    out: list[Check] = []
+    for section in (_rounds_checks, _kills_checks, _positions_checks, _events_checks):
+        try:
+            out += section(tables)
+        except Exception as exc:  # noqa: BLE001 - a checker must report bad data, never crash on it
+            out.append(_c(f"{section.__name__.strip('_').replace('_checks', '')}.checks_crashed", "error", False,
+                          f"{type(exc).__name__}: {exc}"))
+    return out
 
 
 def run_checks(match_id: str) -> list[Check]:
