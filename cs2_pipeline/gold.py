@@ -12,6 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 from .config import GOLD_DIR, get_logger
+from .facts import build_fact_player, build_fact_round
+from .insights import compute_team_metrics, findings, player_leaderboard
+from .silver import list_matches, read_match
 from .stats import wilson_ci
 
 log = get_logger()
@@ -198,3 +201,67 @@ def run_gold(silver: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
              len(outcomes), n_matches, GOLD_DIR / "report.md")
 
     return {"outcomes": outcomes, "impact": impact, "by_weapon": by_weapon}
+
+
+def build_facts(match_ids: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """fact_round and fact_player across matches, read one match at a time."""
+    rounds, players = [], []
+    for mid in (match_ids if match_ids is not None else list_matches()):
+        t = read_match(mid)
+        rounds.append(build_fact_round(t))
+        players.append(build_fact_player(t))
+    return (pd.concat(rounds, ignore_index=True) if rounds else pd.DataFrame(),
+            pd.concat(players, ignore_index=True) if players else pd.DataFrame())
+
+
+def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.DataFrame,
+                          n_matches: int, n_rounds: int, top: int = 15) -> str:
+    lines = ["# CS2 — Team & Player Insights (Gold)", "",
+             f"Base: **{n_matches} match(es)**, **{n_rounds} rounds**.", ""]
+    lines += ["## Findings", ""]
+    if found.empty:
+        best = int(metrics["n"].max()) if not metrics.empty else 0
+        lines += ["No finding clears the evidence bar yet: every rate is still compatible with its baseline.",
+                  f"The largest sample behind any rate is {best} events. Add more matches "
+                  "(a team needs dozens of rounds per map and side before a difference is believable).", ""]
+    else:
+        lines += ["A finding means the 95% interval is entirely above/below its baseline.", "",
+                  "| Team | Map | Side | Metric | Rate | 95% CI | vs baseline | n | Confidence |",
+                  "|---|---|---|---|---:|---:|---:|---:|---|"]
+        for _, r in found.head(top).iterrows():
+            lines.append(f"| {r['team']} | {r['map_name']} | {r['side']} | {r['metric']} | {_fmt_pct(r['rate'])} | "
+                         f"{_fmt_pct(r['ci_low'])}–{_fmt_pct(r['ci_high'])} | {_fmt_pct(r['baseline'])} "
+                         f"({r['baseline_source']}) | {int(r['n'])} | {r['confidence']} |")
+        lines.append("")
+    if not board.empty:
+        lines += ["## Players", "", "| Player | Team | Rounds | ADR | KAST | K/D | Opening duels won |",
+                  "|---|---|---:|---:|---:|---:|---:|"]
+        for _, r in board.head(10).iterrows():
+            lines.append(f"| {r['name']} | {r['team']} | {int(r['rounds'])} | {r['adr']} | {_fmt_pct(r['kast_pct'])} | "
+                         f"{r['kd']} | {_fmt_pct(r['opening_win_rate'])} ({r['opening_confidence']}) |")
+        lines.append("")
+    lines += ["## How to read this",
+              "- `field` baselines compare a team with every other team in the same map/side slice.",
+              "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
+              "- ADR and KAST are weighted by rounds played across matches.", ""]
+    return "\n".join(lines)
+
+
+def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """Fact tables, team metrics, findings and the insights report, from the Silver lake."""
+    ids = match_ids if match_ids is not None else list_matches()
+    fr, fp = build_facts(ids)
+    metrics = compute_team_metrics(fr) if not fr.empty else pd.DataFrame()
+    found = findings(metrics) if not metrics.empty else pd.DataFrame()
+    board = player_leaderboard(fp)
+    for name, df in (("fact_round", fr), ("fact_player", fp), ("team_metrics", metrics),
+                     ("findings", found), ("player_leaderboard", board)):
+        path = GOLD_DIR / f"{name}.parquet"
+        if df.empty:
+            path.unlink(missing_ok=True)  # never leave a previous run's numbers next to a new report
+        else:
+            df.to_parquet(path, index=False)
+    report = build_insights_report(metrics, found, board, len(ids), len(fr))
+    Path(GOLD_DIR / "insights.md").write_text(report, encoding="utf-8")
+    log.info("Gold insights: %d matches, %d rounds, %d metrics, %d findings.", len(ids), len(fr), len(metrics), len(found))
+    return {"fact_round": fr, "fact_player": fp, "team_metrics": metrics, "findings": found, "leaderboard": board}
