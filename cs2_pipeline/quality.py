@@ -48,6 +48,8 @@ def _rounds_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     dup = r["round_num"].duplicated().sum()
     out.append(_c("rounds.unique_round_num", "error", dup == 0, f"{dup} duplicated round numbers"))
     nums = sorted(r["round_num"])
+    out.append(_c("rounds.starts_at_round_1", "error", nums[0] == 1,
+                  f"first round is {nums[0]}: the demo starts mid-match, so scores and sides would be wrong"))
     gaps = sorted(set(range(nums[0], nums[-1] + 1)) - set(nums))
     out.append(_c("rounds.contiguous", "warning", not gaps, f"missing rounds {gaps[:10]}"))
     bad_winner = (~r["winner"].isin(["CT", "T"]) | r["winner_team"].isna()).sum()
@@ -56,7 +58,15 @@ def _rounds_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("rounds.teams_distinct", "error", same == 0, f"{same} rounds with missing or equal CT/T team"))
     odd = (~r["duration_s"].between(0, 200, inclusive="neither")).sum()
     out.append(_c("rounds.duration_plausible", "warning", odd == 0, f"{odd} rounds outside (0, 200] s"))
+    # A round won by bombing or defusing needs a plant event; if the Bomb table lost
+    # its events the site would silently read "none" for every such round.
+    needs_plant = r["reason"].isin(["target_bombed", "bomb_defused"])
+    unplanted = (needs_plant & (r["bomb_site"] == "none")).sum()
+    out.append(_c("rounds.bomb_reason_has_plant", "error", unplanted == 0,
+                  f"{unplanted} rounds ended by bomb explosion/defuse without a recorded plant"))
     row = m.iloc[0]
+    out.append(_c("matches.has_winner", "warning", max(row["score_a"], row["score_b"]) >= 13,
+                  f"score {row['score_a']}-{row['score_b']}: nobody reached 13, the demo may be cut short"))
     out.append(_c("matches.score_consistent", "error",
                   row["score_a"] + row["score_b"] == row["n_rounds"] == len(r),
                   f"score {row['score_a']}+{row['score_b']} vs {row['n_rounds']} / {len(r)} rounds"))
@@ -130,9 +140,12 @@ def _events_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     first_plant = plants.groupby("round_num")["t_s"].min()
     orphan = sum(1 for _, x in defuses.iterrows() if x["round_num"] not in first_plant.index or x["t_s"] < first_plant[x["round_num"]])
     out.append(_c("bomb.defuse_after_plant", "error", orphan == 0, f"{orphan} defuses without a prior plant"))
-    per_round = e.groupby("round_num").size()
-    out.append(_c("economy.two_sides_per_round", "error", set(per_round.index) == set(r["round_num"]) and (per_round == 2).all(),
-                  "economy must have exactly one CT and one T row per round"))
+    out.append(_c("economy.available", "warning", not e.empty, "no economy rows: buy-type insights will be missing"))
+    if not e.empty:  # absent is a warning above; present but inconsistent is an error
+        per_round = e.groupby("round_num").size()
+        out.append(_c("economy.two_sides_per_round", "error",
+                      set(per_round.index) == set(r["round_num"]) and (per_round == 2).all(),
+                      "economy must have exactly one CT and one T row per round"))
     return out
 
 
