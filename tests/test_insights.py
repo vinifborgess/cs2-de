@@ -3,7 +3,7 @@ import math
 
 import pandas as pd
 
-from cs2_pipeline.insights import METRIC_COLUMNS, compute_team_metrics, findings, team_rounds
+from cs2_pipeline.insights import METRIC_COLUMNS, compute_team_metrics, findings, player_leaderboard, team_rounds
 
 
 def fact_round(rows):
@@ -131,6 +131,20 @@ def test_team_rounds_has_one_row_per_team_per_round():
     tr = team_rounds(fact_round(duel_match(["X"] * 24)))
     assert len(tr) == 48 and tr.groupby("round_num").size().eq(2).all()
     assert tr.groupby("round_num")["won"].sum().eq(1).all()      # exactly one winner per round
+
+
+def test_leaderboard_weights_adr_and_kast_by_rounds_not_by_match():
+    fp = pd.DataFrame([
+        {"match_id": "a", "steamid": "1", "name": "p", "team": "T", "rounds": 10, "kills": 10, "deaths": 5, "assists": 0,
+         "damage": 1000.0, "kast_rounds": 10, "opening_kills": 2, "opening_deaths": 0, "clutch_attempts": 0, "clutch_wins": 0},
+        {"match_id": "b", "steamid": "1", "name": "p", "team": "T", "rounds": 30, "kills": 15, "deaths": 15, "assists": 0,
+         "damage": 1500.0, "kast_rounds": 15, "opening_kills": 0, "opening_deaths": 3, "clutch_attempts": 0, "clutch_wins": 0},
+    ])
+    r = player_leaderboard(fp).iloc[0]
+    assert r["rounds"] == 40 and r["n_matches"] == 2
+    assert r["adr"] == 62.5 and r["kast_pct"] == 0.625      # a plain mean of per-match values would give 75 and 0.75
+    assert r["kd"] == 1.25 and r["opening_win_rate"] == 0.4
+    assert player_leaderboard(fp, min_rounds=41).empty
 
 
 if __name__ == "__main__":

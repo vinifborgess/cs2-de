@@ -125,3 +125,24 @@ def findings(metrics: pd.DataFrame, *, specific_first: bool = True) -> pd.DataFr
     f["specificity"] = (f["map_name"] != "ALL").astype(int) + (f["side"] != "ALL").astype(int)
     order = ["margin"] if not specific_first else ["margin", "specificity"]
     return f.sort_values(order, ascending=False).reset_index(drop=True)
+
+
+def player_leaderboard(fact_player: pd.DataFrame, min_rounds: int = 0) -> pd.DataFrame:
+    """Players aggregated across matches: ADR and KAST are weighted by rounds, not averaged per match."""
+    if fact_player.empty:
+        return pd.DataFrame()
+    g = (fact_player.groupby(["steamid"], as_index=False)
+         .agg(name=("name", "last"), team=("team", "last"), n_matches=("match_id", "nunique"),
+              rounds=("rounds", "sum"), kills=("kills", "sum"), deaths=("deaths", "sum"),
+              assists=("assists", "sum"), damage=("damage", "sum"), kast_rounds=("kast_rounds", "sum"),
+              opening_kills=("opening_kills", "sum"), opening_deaths=("opening_deaths", "sum"),
+              clutch_attempts=("clutch_attempts", "sum"), clutch_wins=("clutch_wins", "sum")))
+    g = g[g["rounds"] >= min_rounds].copy()
+    g["adr"] = (g["damage"] / g["rounds"]).round(1)
+    g["kast_pct"] = (g["kast_rounds"] / g["rounds"]).round(3)
+    g["kd"] = (g["kills"] / g["deaths"].where(g["deaths"] > 0)).round(2)
+    duels = g["opening_kills"] + g["opening_deaths"]
+    sm = [summarize_rate(int(k), int(n)) for k, n in zip(g["opening_kills"], duels)]
+    g["opening_win_rate"] = [x.rate for x in sm]
+    g["opening_confidence"] = [x.confidence for x in sm]
+    return g.sort_values("adr", ascending=False).reset_index(drop=True)
