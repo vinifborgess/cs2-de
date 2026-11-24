@@ -69,6 +69,7 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
                    "winner_side": SIDE["CT"], "reason": 7, "reason_name": "bomb_defused", "is_knife_round": True})
     tick += FREEZE + 2400
 
+    wins = {"Alpha": 0, "Bravo": 0}
     for rnd in range(1, n_rounds + 1):
         start, fe = tick, tick + FREEZE
         end = fe + LIVE
@@ -76,6 +77,11 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         other = "Bravo" if fb_team == "Alpha" else "Alpha"
         fb_side = side_of(fb_team, rnd)
         win_side = fb_side if rng.random() < fb_win_prob else ("T" if fb_side == "CT" else "CT")
+        if rnd == n_rounds and wins["Alpha"] != wins["Bravo"]:
+            # An even-length match cannot end level: the last round goes to the leader.
+            leader = max(wins, key=wins.get)
+            win_side = side_of(leader, rnd)
+        wins["Alpha" if side_of("Alpha", rnd) == win_side else "Bravo"] += 1
         rounds.append({"round_num": rnd, "start_tick": start, "freeze_end_tick": fe, "end_tick": end,
                        "official_end_tick": end + 448, "winner_side": SIDE[win_side], "reason": 9,
                        "reason_name": "terrorists_win" if win_side == "T" else "ct_win", "is_knife_round": False})
