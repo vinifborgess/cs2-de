@@ -397,6 +397,18 @@ def test_failed_quality_checks_quarantine_the_match():
         run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks = real_parse, real_checks
 
 
+def test_gold_only_command_writes_every_gold_output():
+    import run_pipeline
+    from cs2_pipeline.config import GOLD_DIR
+    make_match("syn-goldcli", seed=33)
+    bronze_to_silver("syn-goldcli", force=True)
+    for name in ("report.md", "insights.md", "fact_round.parquet", "team_metrics.parquet"):
+        (GOLD_DIR / name).unlink(missing_ok=True)
+    assert run_pipeline.main(["--gold-only"]) == 0
+    for name in ("report.md", "insights.md", "fact_round.parquet", "fact_player.parquet", "team_metrics.parquet"):
+        assert (GOLD_DIR / name).exists(), name
+
+
 def test_gold_end_to_end_on_the_lake():
     make_match("syn-win", seed=3, fb_win_prob=1.0)
     make_match("syn-mix", seed=4, fb_win_prob=0.5)
