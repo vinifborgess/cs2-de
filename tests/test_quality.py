@@ -22,7 +22,7 @@ def _failed(tables):
 def test_clean_match_passes_every_check():
     tables = _clean()
     checks = check_match(tables)
-    assert len(checks) >= 20
+    assert len(checks) >= 25
     assert summarize(checks) == (0, 0), [str(c) for c in checks if not c.ok]
     assert summarize(run_checks("q-base")) == (0, 0)
 
@@ -71,6 +71,11 @@ def _orphan_defuse(t):
     b = t["bomb"]; row = b.iloc[[0]].copy(); row["event"] = "defuse"; row["round_num"] = 4; row["t_s"] = 50.0
     t["bomb"] = pd.concat([b, row], ignore_index=True)
 def _lose_economy(t): t["economy"].drop(index=0, inplace=True)
+def _mid_match(t):
+    r = t["rounds"]; t["rounds"] = r[r["round_num"] > 3].reset_index(drop=True)
+def _bomb_without_plant(t): t["rounds"].loc[0, "reason"] = "target_bombed"; t["rounds"].loc[0, "bomb_site"] = "none"
+def _no_winner_score(t): t["matches"].loc[0, "score_a"] = 6; t["matches"].loc[0, "score_b"] = 6
+def _empty_economy(t): t["economy"] = t["economy"].iloc[0:0]
 
 MUTATIONS = {
     "rounds.unique_round_num": _dup_round, "rounds.contiguous": _drop_round,
@@ -84,7 +89,9 @@ MUTATIONS = {
     "positions.sides_balanced": _unbalanced_sides, "positions.health_range": _bad_health, "positions.finite_coords": _nan_coord,
     "positions.inside_round": _pos_outside, "damages.values_sane": _bad_damage,
     "bomb.one_plant_per_round": _two_plants, "bomb.defuse_after_plant": _orphan_defuse,
-    "economy.two_sides_per_round": _lose_economy,
+    "economy.two_sides_per_round": _lose_economy, "rounds.starts_at_round_1": _mid_match,
+    "rounds.bomb_reason_has_plant": _bomb_without_plant, "matches.has_winner": _no_winner_score,
+    "economy.available": _empty_economy,
 }
 
 
@@ -95,6 +102,12 @@ def test_every_check_fails_when_its_invariant_is_broken():
     assert not uncovered, f"checks without a mutation test: {sorted(uncovered)}"
     misses = [name for name, fn in MUTATIONS.items() if name not in _failed(_mut(fn)(base))]
     assert not misses, f"corruption not detected by: {misses}"
+
+
+def test_empty_economy_is_a_warning_not_an_error():
+    t = _mut(_empty_economy)(_clean())
+    errors, warnings = summarize(check_match(t))
+    assert errors == 0 and warnings == 1
 
 
 def test_corrupt_data_is_reported_not_raised():

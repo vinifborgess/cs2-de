@@ -69,6 +69,7 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
                    "winner_side": SIDE["CT"], "reason": 7, "reason_name": "bomb_defused", "is_knife_round": True})
     tick += FREEZE + 2400
 
+    wins = {"Alpha": 0, "Bravo": 0}
     for rnd in range(1, n_rounds + 1):
         start, fe = tick, tick + FREEZE
         end = fe + LIVE
@@ -76,6 +77,11 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         other = "Bravo" if fb_team == "Alpha" else "Alpha"
         fb_side = side_of(fb_team, rnd)
         win_side = fb_side if rng.random() < fb_win_prob else ("T" if fb_side == "CT" else "CT")
+        if rnd == n_rounds and wins["Alpha"] != wins["Bravo"]:
+            # An even-length match cannot end level: the last round goes to the leader.
+            leader = max(wins, key=wins.get)
+            win_side = side_of(leader, rnd)
+        wins["Alpha" if side_of("Alpha", rnd) == win_side else "Bravo"] += 1
         rounds.append({"round_num": rnd, "start_tick": start, "freeze_end_tick": fe, "end_tick": end,
                        "official_end_tick": end + 448, "winner_side": SIDE[win_side], "reason": 9,
                        "reason_name": "terrorists_win" if win_side == "T" else "ct_win", "is_knife_round": False})
@@ -155,6 +161,80 @@ def test_normalize_side():
     assert out.tolist()[:4] == ["T", "CT", "CT", "T"] and out.isna().tolist()[4:] == [True, True]
 
 
+def test_blank_clan_names_are_missing_not_a_team():
+    from cs2_pipeline.silver import clean_players
+    raw = pd.DataFrame({"steamid": ["0", "1", "2", "3", "4"], "name": ["CSTV", "a", "b", "c", "d"],
+                        "team_clan_name": [None, "  ", "", "Alpha ", None]})
+    out = clean_players(raw, "m")
+    assert out["steamid"].tolist() == ["3"] and out["team"].tolist() == ["Alpha"]
+
+
+def _rewrite_clan_names(match_id: str, fn) -> None:
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / match_id / "players.parquet"
+    df = pl.read_parquet(path)
+    pl_names = [fn(n) for n in df["team_clan_name"].to_list()]
+    df.with_columns(pl.Series("team_clan_name", pl_names, dtype=pl.String)).write_parquet(path)
+
+
+def test_teams_are_inferred_from_starting_sides_when_names_are_missing():
+    make_match("syn-noname", seed=11)
+    _rewrite_clan_names("syn-noname", lambda n: None)
+    s = bronze_to_silver("syn-noname", force=True)
+    # Alpha starts CT -> "Team A"; the match must keep its 24 rounds and a real score.
+    assert set(s["players"]["team"]) == {"Team A", "Team B"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+    m = s["matches"].iloc[0]
+    assert {m["team_a"], m["team_b"]} == {"Team A", "Team B"}
+    assert m["score_a"] + m["score_b"] == 24
+    r = s["rounds"]
+    assert (r.loc[r["round_num"] <= 12, "ct_team"] == "Team A").all()      # halftime swap survives
+    assert (r.loc[r["round_num"] > 12, "ct_team"] == "Team B").all()
+
+
+def test_partial_names_are_completed_from_side_mates_and_never_invented_over_real_ones():
+    make_match("syn-partial", seed=12)
+    seen = {"n": 0}
+
+    def drop_two(n):  # blank two of Alpha's players and one of Bravo's, keep the rest
+        seen["n"] += 1
+        return None if seen["n"] in (2, 3, 8) else n
+    _rewrite_clan_names("syn-partial", drop_two)
+    s = bronze_to_silver("syn-partial", force=True)
+    assert set(s["players"]["team"]) == {"Alpha", "Bravo"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+
+
+def test_oversized_side_group_is_not_treated_as_a_team():
+    from cs2_pipeline.silver import _fill_team_names
+    df = pd.DataFrame({"steamid": [str(i) for i in range(7)], "team_clan_name": [None] * 7})
+    out = _fill_team_names(df, {str(i): "CT" for i in range(7)})
+    assert out["team_clan_name"].isna().all()
+
+
+def test_restarted_rounds_keep_only_the_round_that_was_played_out():
+    from cs2_pipeline.silver import clean_rounds_base
+    raw = pd.DataFrame({
+        "round_num": [1, 1, 2], "start_tick": [1000, 5000, 9000], "freeze_end_tick": [1500, 5500, 9500],
+        "end_tick": [2000, 8000, 12000], "winner_side": ["terrorist", "counter-terrorist", "terrorist"],
+        "is_knife_round": [False, False, False], "reason": [1, 1, 1], "reason_name": ["a", "b", "c"]})
+    out = clean_rounds_base(raw)
+    assert out["round_num"].tolist() == [1, 2] and out["start_tick"].tolist() == [5000, 9000]
+    assert out["winner"].tolist() == ["CT", "T"]
+
+
+def test_restarted_round_does_not_break_a_whole_match():
+    make_match("syn-restart", seed=13)
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / "syn-restart" / "rounds.parquet"
+    r = pl.read_parquet(path)
+    first = r.filter(pl.col("round_num") == 1)
+    ghost = first.with_columns(*(pl.col(c) - 3 for c in ("start_tick", "freeze_end_tick", "end_tick") if c in first.columns))
+    pl.concat([ghost, r]).sort("start_tick").write_parquet(path)
+    s = bronze_to_silver("syn-restart", force=True)
+    assert len(s["rounds"]) == 24 and s["rounds"]["round_num"].is_unique
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})
@@ -186,6 +266,21 @@ def test_silver_contracts_noise_and_sides():
     # Freeze-time snapshots are dropped: 3 live samples x 10 players per round.
     assert len(s["positions"]) == exp["n_rounds"] * 3 * 10 and (s["positions"]["t_s"] >= 0).all()
     assert s["positions"]["steamid"].str.len().eq(17).all()
+
+
+def test_list_matches_and_read_match_respect_quarantine():
+    from cs2_pipeline.silver import list_matches, quarantine, read_match, release
+    make_match("syn-list", seed=31, n_rounds=12)
+    bronze_to_silver("syn-list", force=True)
+    assert "syn-list" in list_matches()
+    t = read_match("syn-list", ("rounds", "kills"))
+    assert set(t) == {"rounds", "kills"} and len(t["rounds"]) == 12
+    assert set(read_match("syn-list")) == set(SILVER_SCHEMAS)
+    quarantine("syn-list", ["test"])
+    try:
+        assert "syn-list" not in list_matches() and "syn-list" in list_matches(include_quarantined=True)
+    finally:
+        release("syn-list")
 
 
 def test_silver_is_idempotent():
@@ -300,6 +395,18 @@ def test_failed_quality_checks_quarantine_the_match():
         assert "qa-bad" not in quarantined()
     finally:
         run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks = real_parse, real_checks
+
+
+def test_gold_only_command_writes_every_gold_output():
+    import run_pipeline
+    from cs2_pipeline.config import GOLD_DIR
+    make_match("syn-goldcli", seed=33)
+    bronze_to_silver("syn-goldcli", force=True)
+    for name in ("report.md", "insights.md", "fact_round.parquet", "team_metrics.parquet"):
+        (GOLD_DIR / name).unlink(missing_ok=True)
+    assert run_pipeline.main(["--gold-only"]) == 0
+    for name in ("report.md", "insights.md", "fact_round.parquet", "fact_player.parquet", "team_metrics.parquet"):
+        assert (GOLD_DIR / name).exists(), name
 
 
 def test_gold_end_to_end_on_the_lake():

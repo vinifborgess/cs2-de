@@ -36,7 +36,7 @@ from pathlib import Path
 from cs2_pipeline.config import RAW_DIR, get_logger
 from cs2_pipeline.bronze import parse_demo_to_bronze
 from cs2_pipeline.silver import bronze_to_silver, load_silver_lake, quarantine, release
-from cs2_pipeline.gold import run_gold
+from cs2_pipeline.gold import run_gold, run_gold_facts
 from cs2_pipeline.quality import list_matches, run_checks, summarize
 
 log = get_logger()
@@ -64,6 +64,12 @@ def process_one(demo_path: Path, match_id: str, force: bool) -> bool:
         log.error("Falha em '%s' (%s) — pulando. Motivo: %s",
                   match_id, demo_path.name, exc)
         return False
+
+
+def run_all_gold() -> None:
+    """Gold over the whole lake: statistical power comes from aggregating across matches."""
+    run_gold(load_silver_lake(("kills", "rounds")))  # First Blood report
+    run_gold_facts()                                  # fact tables, team metrics, findings, insights.md
 
 
 def run_quality(match_ids: list[str], *, strict: bool = False) -> int:
@@ -102,8 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_quality([args.match_id] if args.match_id else list_matches(), strict=args.strict)
 
     if args.gold_only:
-        silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
-        run_gold(silver)
+        run_all_gold()
         log.info("Concluído em %.1fs.", time.time() - t0)
         return 0
 
@@ -134,8 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Gold sempre roda sobre o lake inteiro (poder estatístico vem da agregação).
-    silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
-    run_gold(silver)
+    run_all_gold()
     log.info("Concluído em %.1fs.", time.time() - t0)
     return 2 if failed else 0
 
