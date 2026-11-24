@@ -21,6 +21,28 @@ GOLD_DIR = DATA_DIR / "gold"
 for _dir in (RAW_DIR, BRONZE_DIR, SILVER_DIR, GOLD_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
+# --- Bronze -----------------------------------------------------------------
+# Raw tables persisted per match, exactly as awpy 3 returns them.
+BRONZE_TABLES: tuple[str, ...] = (
+    "header",        # 1 row: map, server, tick rate, playback length
+    "players",       # roster: steamid, name, side, clan name
+    "rounds",
+    "kills",
+    "damages",
+    "bomb",          # pickup / drop / plant / defuse events
+    "smokes",
+    "grenades",      # grenade trajectories, one row per tick
+    "shots",
+    "blinds",
+    "item_events",   # buys, pickups, drops
+    "round_economy",
+    "snapshots",     # player state sampled at SNAPSHOT_HZ (positions, hp, weapon...)
+)
+
+# Player-state sampling rate for the snapshots table, in samples per second.
+# 4 Hz keeps a full match around 2 MB of Parquet and is enough for a 2D replay.
+SNAPSHOT_HZ: float = float(os.environ.get("CS2_SNAPSHOT_HZ", "4"))
+
 KILLS_SCHEMA: dict[str, str] = {
     "match_id": "string",
     "round_num": "int64",
