@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 from .config import GOLD_DIR, get_logger
 from .facts import build_fact_player, build_fact_round
+from .quality import check_match, summarize
 from .insights import compute_team_metrics, findings, player_leaderboard
 from .silver import list_matches, read_match
 from .stats import wilson_ci
@@ -203,19 +204,36 @@ def run_gold(silver: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return {"outcomes": outcomes, "impact": impact, "by_weapon": by_weapon}
 
 
-def build_facts(match_ids: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """fact_round and fact_player across matches, read one match at a time."""
-    rounds, players = [], []
+def build_facts(match_ids: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
+    """fact_round and fact_player across matches, read one match at a time.
+
+    A match whose Silver fails the data-quality errors (even if nobody quarantined it) or whose
+    facts cannot be built is left out and reported in the third value, so one bad match never
+    takes the whole Gold run down or leaks wrong numbers into it.
+    """
+    rounds, players, skipped = [], [], {}
     for mid in (match_ids if match_ids is not None else list_matches()):
-        t = read_match(mid)
-        rounds.append(build_fact_round(t))
-        players.append(build_fact_player(t))
+        try:
+            t = read_match(mid)
+            errors = [c for c in check_match(t) if not c.ok and c.level == "error"]
+            if errors:
+                skipped[mid] = "; ".join(c.name for c in errors)
+                log.warning("Gold: skipping '%s' - failed quality checks: %s", mid, skipped[mid])
+                continue
+            fr, fp = build_fact_round(t), build_fact_player(t)
+        except Exception as exc:  # noqa: BLE001 - isolate the match, keep the batch
+            skipped[mid] = f"{type(exc).__name__}: {exc}"
+            log.error("Gold: skipping '%s' - %s", mid, skipped[mid])
+            continue
+        rounds.append(fr)
+        players.append(fp)
     return (pd.concat(rounds, ignore_index=True) if rounds else pd.DataFrame(),
-            pd.concat(players, ignore_index=True) if players else pd.DataFrame())
+            pd.concat(players, ignore_index=True) if players else pd.DataFrame(), skipped)
 
 
 def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.DataFrame,
-                          n_matches: int, n_rounds: int, top: int = 15) -> str:
+                          n_matches: int, n_rounds: int, top: int = 15,
+                          skipped: dict[str, str] | None = None) -> str:
     lines = ["# CS2 — Team & Player Insights (Gold)", "",
              f"Base: **{n_matches} match(es)**, **{n_rounds} rounds**.", ""]
     lines += ["## Findings", ""]
@@ -240,6 +258,8 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
             lines.append(f"| {r['name']} | {r['team']} | {int(r['rounds'])} | {r['adr']} | {_fmt_pct(r['kast_pct'])} | "
                          f"{r['kd']} | {_fmt_pct(r['opening_win_rate'])} ({r['opening_confidence']}) |")
         lines.append("")
+    if skipped:
+        lines += ["## Excluded matches", "", *[f"- `{m}`: {why}" for m, why in sorted(skipped.items())], ""]
     lines += ["## How to read this",
               "- `field` baselines compare a team with every other team in the same map/side slice.",
               "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
@@ -250,7 +270,7 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
 def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame]:
     """Fact tables, team metrics, findings and the insights report, from the Silver lake."""
     ids = match_ids if match_ids is not None else list_matches()
-    fr, fp = build_facts(ids)
+    fr, fp, skipped = build_facts(ids)
     metrics = compute_team_metrics(fr) if not fr.empty else pd.DataFrame()
     found = findings(metrics) if not metrics.empty else pd.DataFrame()
     board = player_leaderboard(fp)
@@ -261,7 +281,9 @@ def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame
             path.unlink(missing_ok=True)  # never leave a previous run's numbers next to a new report
         else:
             df.to_parquet(path, index=False)
-    report = build_insights_report(metrics, found, board, len(ids), len(fr))
+    report = build_insights_report(metrics, found, board, len(ids) - len(skipped), len(fr), skipped=skipped)
     Path(GOLD_DIR / "insights.md").write_text(report, encoding="utf-8")
-    log.info("Gold insights: %d matches, %d rounds, %d metrics, %d findings.", len(ids), len(fr), len(metrics), len(found))
-    return {"fact_round": fr, "fact_player": fp, "team_metrics": metrics, "findings": found, "leaderboard": board}
+    log.info("Gold insights: %d matches (%d excluded), %d rounds, %d metrics, %d findings.",
+             len(ids) - len(skipped), len(skipped), len(fr), len(metrics), len(found))
+    return {"fact_round": fr, "fact_player": fp, "team_metrics": metrics, "findings": found,
+            "leaderboard": board, "skipped": skipped}

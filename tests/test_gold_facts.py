@@ -30,6 +30,23 @@ def test_facts_cover_every_clean_match_and_skip_quarantined_ones():
     assert out["leaderboard"]["rounds"].sum() == fp["rounds"].sum()
 
 
+def test_a_corrupt_match_is_excluded_and_reported_instead_of_crashing_gold():
+    from cs2_pipeline.silver import _silver_path
+    make_match("gf-ok", seed=50)
+    make_match("gf-corrupt", seed=51)
+    for mid in ("gf-ok", "gf-corrupt"):
+        bronze_to_silver(mid, force=True)
+    path = _silver_path("rounds", "gf-corrupt")          # corrupted on disk, never quarantined
+    r = pd.read_parquet(path)
+    r.loc[1, "round_num"] = r.loc[0, "round_num"]
+    r.to_parquet(path, index=False)
+    out = run_gold_facts(["gf-ok", "gf-corrupt"])
+    assert set(out["fact_round"]["match_id"]) == {"gf-ok"} and set(out["skipped"]) == {"gf-corrupt"}
+    assert "rounds.unique_round_num" in out["skipped"]["gf-corrupt"]
+    text = (GOLD_DIR / "insights.md").read_text(encoding="utf-8")
+    assert "## Excluded matches" in text and "`gf-corrupt`" in text and "**1 match(es)**" in text
+
+
 def test_run_gold_facts_on_an_empty_selection_does_not_crash():
     out = run_gold_facts([])
     assert out["fact_round"].empty and out["findings"].empty
