@@ -142,10 +142,46 @@ def _finish(df: pd.DataFrame, table: str, match_id: str) -> pd.DataFrame:
 
 # --- table builders -----------------------------------------------------------
 
-def clean_players(raw: pd.DataFrame, match_id: str) -> pd.DataFrame:
+def infer_start_sides(snap: pd.DataFrame, base: pd.DataFrame) -> dict[str, str]:
+    """Side (CT/T) each player started the first valid round on, from the snapshots."""
+    if snap.empty or base.empty:
+        return {}
+    first = base.iloc[0]
+    df = snap[(snap["tick"] >= first["start_tick"]) & (snap["tick"] <= first["end_tick"])].copy()
+    df["side"] = normalize_side(df["side"])
+    df = df[df["side"].isin(["CT", "T"])].sort_values("tick")
+    df["steamid"] = df["steamid"].astype("string")
+    return df.drop_duplicates("steamid").set_index("steamid")["side"].to_dict()
+
+
+def _fill_team_names(df: pd.DataFrame, start_side: dict[str, str]) -> pd.DataFrame:
+    """Name players without a clan name from who they started the match with.
+
+    Players that start on the same side are one team, so a missing name takes
+    the team name its side-mates carry. With no names at all, the two halves
+    become 'Team A' (started CT) and 'Team B' (started T). A side holding more
+    than 5 players is not a team, so nothing is inferred for it.
+    """
+    df = df.copy()
+    df["_start"] = df["steamid"].astype("string").map(start_side)
+    fallback = {"CT": "Team A", "T": "Team B"}
+    for side, grp in df.dropna(subset=["_start"]).groupby("_start"):
+        if len(grp) > 5:
+            continue
+        known = grp["team_clan_name"].dropna()
+        name = known.mode().iat[0] if len(known) else fallback[side]
+        idx = grp.index[grp["team_clan_name"].isna()]
+        df.loc[idx, "team_clan_name"] = name
+    return df.drop(columns="_start")
+
+
+def clean_players(raw: pd.DataFrame, match_id: str,
+                  start_side: dict[str, str] | None = None) -> pd.DataFrame:
     df = raw[raw["steamid"].astype("string") != _PSEUDO_PLAYER].copy()
     # A blank clan name is a missing one: otherwise "" would be treated as a team.
     df["team_clan_name"] = df["team_clan_name"].astype("string").str.strip().replace("", pd.NA)
+    if start_side:
+        df = _fill_team_names(df, start_side)
     df = df.dropna(subset=["team_clan_name"])
     df = df.rename(columns={"team_clan_name": "team"})
     return _finish(df.drop_duplicates("steamid"), "players", match_id)
@@ -286,11 +322,12 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
     header = read_bronze(match_id, "header")
     tick_rate = float(header["tick_rate"].iloc[0])
 
-    players = clean_players(read_bronze(match_id, "players"), match_id)
-    team_of = dict(zip(players["steamid"], players["team"]))
-
     base = clean_rounds_base(read_bronze(match_id, "rounds"))
-    positions = clean_positions(read_bronze(match_id, "snapshots"), base, team_of, tick_rate, match_id)
+    snapshots = read_bronze(match_id, "snapshots")
+    players = clean_players(read_bronze(match_id, "players"), match_id,
+                            start_side=infer_start_sides(snapshots, base))
+    team_of = dict(zip(players["steamid"], players["team"]))
+    positions = clean_positions(snapshots, base, team_of, tick_rate, match_id)
     bomb = clean_bomb(read_bronze(match_id, "bomb"), base, team_of, tick_rate, match_id)
     rounds = clean_rounds(base, positions, bomb, tick_rate, match_id)
 

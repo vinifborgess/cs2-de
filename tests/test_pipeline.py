@@ -163,6 +163,49 @@ def test_blank_clan_names_are_missing_not_a_team():
     assert out["steamid"].tolist() == ["3"] and out["team"].tolist() == ["Alpha"]
 
 
+def _rewrite_clan_names(match_id: str, fn) -> None:
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / match_id / "players.parquet"
+    df = pl.read_parquet(path)
+    pl_names = [fn(n) for n in df["team_clan_name"].to_list()]
+    df.with_columns(pl.Series("team_clan_name", pl_names, dtype=pl.String)).write_parquet(path)
+
+
+def test_teams_are_inferred_from_starting_sides_when_names_are_missing():
+    make_match("syn-noname", seed=11)
+    _rewrite_clan_names("syn-noname", lambda n: None)
+    s = bronze_to_silver("syn-noname", force=True)
+    # Alpha starts CT -> "Team A"; the match must keep its 24 rounds and a real score.
+    assert set(s["players"]["team"]) == {"Team A", "Team B"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+    m = s["matches"].iloc[0]
+    assert {m["team_a"], m["team_b"]} == {"Team A", "Team B"}
+    assert m["score_a"] + m["score_b"] == 24
+    r = s["rounds"]
+    assert (r.loc[r["round_num"] <= 12, "ct_team"] == "Team A").all()      # halftime swap survives
+    assert (r.loc[r["round_num"] > 12, "ct_team"] == "Team B").all()
+
+
+def test_partial_names_are_completed_from_side_mates_and_never_invented_over_real_ones():
+    make_match("syn-partial", seed=12)
+    seen = {"n": 0}
+
+    def drop_two(n):  # blank two of Alpha's players and one of Bravo's, keep the rest
+        seen["n"] += 1
+        return None if seen["n"] in (2, 3, 8) else n
+    _rewrite_clan_names("syn-partial", drop_two)
+    s = bronze_to_silver("syn-partial", force=True)
+    assert set(s["players"]["team"]) == {"Alpha", "Bravo"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+
+
+def test_oversized_side_group_is_not_treated_as_a_team():
+    from cs2_pipeline.silver import _fill_team_names
+    df = pd.DataFrame({"steamid": [str(i) for i in range(7)], "team_clan_name": [None] * 7})
+    out = _fill_team_names(df, {str(i): "CT" for i in range(7)})
+    assert out["team_clan_name"].isna().all()
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})
