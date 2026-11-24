@@ -84,9 +84,9 @@ cat data/gold/report.md
 No demo handy? Validate the install and the analytics logic with the synthetic tests - they need no `.dem`:
 
 ```bash
-python -m tests.test_pipeline
+python -m tests
 # optional: also run end to end on a real demo
-CS2_TEST_DEMO=data/raw/match.dem python -m tests.test_pipeline
+CS2_TEST_DEMO=data/raw/match.dem python -m tests
 ```
 
 The player-state sampling rate is configurable: `CS2_SNAPSHOT_HZ=8 python run_pipeline.py --all --force`.

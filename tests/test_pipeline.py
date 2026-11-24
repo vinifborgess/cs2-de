@@ -271,12 +271,6 @@ def test_real_demo_end_to_end():
 
 
 if __name__ == "__main__":
-    failed = 0
-    for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_")):
-        try:
-            fn()
-            print(f"PASS {name}")
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL {name}: {type(exc).__name__}: {exc}")
-    raise SystemExit(1 if failed else 0)
+    from tests._runner import run
+
+    raise SystemExit(run(globals()))
