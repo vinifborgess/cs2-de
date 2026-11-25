@@ -156,14 +156,19 @@ def test_team_rounds_has_one_row_per_team_per_round():
 def test_leaderboard_weights_adr_and_kast_by_rounds_not_by_match():
     fp = pd.DataFrame([
         {"match_id": "a", "steamid": "1", "name": "p", "team": "T", "rounds": 10, "kills": 10, "deaths": 5, "assists": 0,
-         "damage": 1000.0, "kast_rounds": 10, "opening_kills": 2, "opening_deaths": 0, "clutch_attempts": 0, "clutch_wins": 0},
+         "damage": 1000.0, "kast_rounds": 10, "opening_kills": 2, "opening_deaths": 0, "clutch_attempts": 0,
+         "clutch_wins": 0, "post_round_kills": 1, "post_round_deaths": 0, "post_round_damage": 100.0},
         {"match_id": "b", "steamid": "1", "name": "p", "team": "T", "rounds": 30, "kills": 15, "deaths": 15, "assists": 0,
-         "damage": 1500.0, "kast_rounds": 15, "opening_kills": 0, "opening_deaths": 3, "clutch_attempts": 0, "clutch_wins": 0},
+         "damage": 1500.0, "kast_rounds": 15, "opening_kills": 0, "opening_deaths": 3, "clutch_attempts": 0,
+         "clutch_wins": 0, "post_round_kills": 0, "post_round_deaths": 2, "post_round_damage": 0.0},
     ])
     r = player_leaderboard(fp).iloc[0]
     assert r["rounds"] == 40 and r["n_matches"] == 2
     assert r["adr"] == 62.5 and r["kast_pct"] == 0.625      # a plain mean of per-match values would give 75 and 0.75
     assert r["kd"] == 1.25 and r["opening_win_rate"] == 0.4
+    # Public totals add the post-round events; the live ones above are untouched.
+    assert (r["kills_total"], r["deaths_total"]) == (26, 22) and r["kd_total"] == 1.18
+    assert r["adr_total"] == 65.0 and r["kills"] == 25
     assert player_leaderboard(fp, min_rounds=41).empty
 
 

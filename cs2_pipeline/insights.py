@@ -175,7 +175,13 @@ def findings(metrics: pd.DataFrame, *, specific_first: bool = True) -> pd.DataFr
 
 
 def player_leaderboard(fact_player: pd.DataFrame, min_rounds: int = 0) -> pd.DataFrame:
-    """Players aggregated across matches: ADR and KAST are weighted by rounds, not averaged per match."""
+    """Players aggregated across matches: ADR and KAST are weighted by rounds, not averaged per match.
+
+    Two sets of totals come out of this. ``kills``, ``deaths`` and ``adr`` cover the live phase
+    of each round, which is what every rate here is about. ``kills_total``, ``deaths_total``
+    and ``adr_total`` add the post-round events, which is how public stat pages count, so they
+    are the numbers to compare with HLTV. KAST stays on the live phase in both.
+    """
     if fact_player.empty:
         return pd.DataFrame()
     g = (fact_player.groupby(["steamid"], as_index=False)
@@ -183,11 +189,19 @@ def player_leaderboard(fact_player: pd.DataFrame, min_rounds: int = 0) -> pd.Dat
               rounds=("rounds", "sum"), kills=("kills", "sum"), deaths=("deaths", "sum"),
               assists=("assists", "sum"), damage=("damage", "sum"), kast_rounds=("kast_rounds", "sum"),
               opening_kills=("opening_kills", "sum"), opening_deaths=("opening_deaths", "sum"),
-              clutch_attempts=("clutch_attempts", "sum"), clutch_wins=("clutch_wins", "sum")))
+              clutch_attempts=("clutch_attempts", "sum"), clutch_wins=("clutch_wins", "sum"),
+              post_kills=("post_round_kills", "sum"), post_deaths=("post_round_deaths", "sum"),
+              post_damage=("post_round_damage", "sum")))
     g = g[g["rounds"] >= min_rounds].copy()
     g["adr"] = (g["damage"] / g["rounds"]).round(1)
     g["kast_pct"] = (g["kast_rounds"] / g["rounds"]).round(3)
     g["kd"] = (g["kills"] / g["deaths"].where(g["deaths"] > 0)).round(2)
+    # Totals as public stat pages count them: the live phase plus what happened after it.
+    g["kills_total"] = g["kills"] + g["post_kills"]
+    g["deaths_total"] = g["deaths"] + g["post_deaths"]
+    g["kd_total"] = (g["kills_total"] / g["deaths_total"].where(g["deaths_total"] > 0)).round(2)
+    g["adr_total"] = ((g["damage"] + g["post_damage"]) / g["rounds"]).round(1)
+    g = g.drop(columns=["post_kills", "post_deaths", "post_damage"])
     duels = g["opening_kills"] + g["opening_deaths"]
     sm = [summarize_rate(int(k), int(n)) for k, n in zip(g["opening_kills"], duels)]
     g["opening_win_rate"] = [x.rate for x in sm]

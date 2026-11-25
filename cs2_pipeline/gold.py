@@ -253,11 +253,13 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
                          f"({r['baseline_source']}) | {int(r['n'])} | {r['q_value']:.3f} | {r['confidence']} |")
         lines.append("")
     if not board.empty:
-        lines += ["## Players", "", "| Player | Team | Rounds | ADR | KAST | K/D | Opening duels won |",
-                  "|---|---|---:|---:|---:|---:|---:|"]
+        lines += ["## Players", "",
+                  "| Player | Team | Rounds | ADR | KAST | K-D | K/D | Opening duels won |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|"]
         for _, r in board.head(10).iterrows():
-            lines.append(f"| {r['name']} | {r['team']} | {int(r['rounds'])} | {r['adr']} | {_fmt_pct(r['kast_pct'])} | "
-                         f"{r['kd']} | {_fmt_pct(r['opening_win_rate'])} ({r['opening_confidence']}) |")
+            lines.append(f"| {r['name']} | {r['team']} | {int(r['rounds'])} | {r['adr_total']} | "
+                         f"{_fmt_pct(r['kast_pct'])} | {int(r['kills_total'])}-{int(r['deaths_total'])} | "
+                         f"{r['kd_total']} | {_fmt_pct(r['opening_win_rate'])} ({r['opening_confidence']}) |")
         lines.append("")
     if skipped:
         lines += ["## Excluded matches", "", *[f"- `{m}`: {why}" for m, why in sorted(skipped.items())], ""]
@@ -270,7 +272,9 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
               "  with an exact binomial test, a field baseline with Fisher's exact test, because a field",
               "  baseline is itself measured and carries its own error.",
               "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
-              "- ADR and KAST are weighted by rounds played across matches.", ""]
+              "- ADR and KAST are weighted by rounds played across matches.",
+              "- K-D and ADR include kills and damage after the round was decided, which is how public",
+              "  stat pages count; KAST and every rate above cover the live phase only.", ""]
     return "\n".join(lines)
 
 
