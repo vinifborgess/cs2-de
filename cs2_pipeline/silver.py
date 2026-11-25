@@ -424,7 +424,9 @@ def build_matches(rounds: pd.DataFrame, header: pd.DataFrame, manifest: dict | N
         "tick_rate": float(h["tick_rate"]), "n_rounds": len(rounds), "team_a": a, "team_b": b,
         "score_a": int(wins.get(a, 0)), "score_b": int(wins.get(b, 0)),
         "demo_sha256": (manifest or {}).get("demo_sha256"),
-        **entry_for(match_id),   # event context: from data/catalog.json, else derived, else null
+        # Event context: from data/catalog.json, else derived from the id, else null. The
+        # team names go along so an event in the file name is not mistaken for a team.
+        **entry_for(match_id, teams=[t for t in (a, b) if t]),
     }
     return _finish(pd.DataFrame([row]), "matches", match_id)
 

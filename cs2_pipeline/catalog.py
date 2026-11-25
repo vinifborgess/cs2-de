@@ -26,8 +26,13 @@ CATALOG_PATH = DATA_DIR / "catalog.json"
 #: Fields a catalog entry may set. Everything else in the file is kept but ignored here.
 CATALOG_FIELDS: tuple[str, ...] = ("event", "stage", "played_on", "series_id", "map_order", "best_of")
 
-#: ``<team-a>-vs-<team-b>-m<N>-<map>``, the naming HLTV downloads tend to follow.
-_ID_PATTERN = re.compile(r"^(?P<a>[^-]+(?:-[^-]+)*?)-vs-(?P<b>.+?)-m(?P<order>\d+)(?:-(?P<map>.+))?$")
+#: ``<left>-vs-<right>-m<N>[-<map>]``: the naming HLTV downloads tend to follow. ``left`` may
+#: carry the event in front of the team, which only the match's real team names can resolve.
+_ID_PATTERN = re.compile(r"^(?P<left>.+?)-vs-(?P<right>.+?)-m(?P<order>\d+)(?:-(?P<map>.+))?$")
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
 
 
 def _parse_date(value: Any) -> str | None:
@@ -43,13 +48,43 @@ def _parse_date(value: Any) -> str | None:
         return None
 
 
-def derive_from_match_id(match_id: str) -> dict[str, Any]:
-    """Series and map order read off a ``<a>-vs-<b>-m<N>-<map>`` match id; {} otherwise."""
+def derive_from_match_id(match_id: str, teams: list[str] | None = None) -> dict[str, Any]:
+    """What a ``<a>-vs-<b>-m<N>-<map>`` match id gives away; ``{}`` when it is not one.
+
+    The series and the map order come from the two sides of ``-vs-`` and the ``m<N>``, with the
+    teams sorted so both halves of a series share one id.
+
+    An event in front of the team name is only read when the match's own team names are
+    passed in, because the file name alone cannot resolve it: ``natus-vincere-vs-furia`` is
+    one team called Natus Vincere, not an event called "natus". Given the real names, the
+    event is whatever is left once a name is removed, kept verbatim as the file spelled it -
+    turning ``blast-rivals-fall-2026`` into a display name would mean guessing where the
+    capitals go, and the catalog is where the real name belongs.
+
+    The date is never here: a CS2 demo carries no timestamp and a file's own mtime is when it
+    was downloaded, so ``played_on`` comes from the catalog or stays empty.
+    """
     m = _ID_PATTERN.match(match_id)
     if not m:
         return {}
-    teams = sorted((m.group("a").lower(), m.group("b").lower()))
-    return {"series_id": f"{teams[0]}-vs-{teams[1]}", "map_order": int(m.group("order"))}
+    left, right = m.group("left").lower(), m.group("right").lower()
+    out: dict[str, Any] = {"map_order": int(m.group("order"))}
+    event = None
+    if teams:
+        known = sorted({_slug(t) for t in teams if str(t).strip()}, key=len, reverse=True)
+        # The event is whatever sits before a name the demo itself reports.
+        for slug in known:
+            if left == slug:
+                break
+            if left.endswith(f"-{slug}"):
+                left, event = slug, left[: -len(slug) - 1]
+                break
+    pair = sorted((left, right))
+    out["series_id"] = f"{pair[0]}-vs-{pair[1]}"
+    if event:
+        out["event"] = event
+        out["series_id"] = f"{event}-{out['series_id']}"
+    return out
 
 
 def load_catalog() -> dict[str, dict]:
@@ -68,11 +103,16 @@ def load_catalog() -> dict[str, dict]:
     return {str(k): v for k, v in entries.items() if isinstance(v, dict)}
 
 
-def entry_for(match_id: str, catalog: dict[str, dict] | None = None) -> dict[str, Any]:
-    """Catalog fields for one match, with the derivable ones filled in and the source named."""
+def entry_for(match_id: str, catalog: dict[str, dict] | None = None,
+              teams: list[str] | None = None) -> dict[str, Any]:
+    """Catalog fields for one match, with the derivable ones filled in and the source named.
+
+    ``teams`` are the match's own clan names, which is what lets an event in the file name be
+    told apart from a team whose name has a hyphen in it.
+    """
     cat = load_catalog() if catalog is None else catalog
     given = {k: v for k, v in (cat.get(match_id) or {}).items() if k in CATALOG_FIELDS and v not in (None, "")}
-    derived = {k: v for k, v in derive_from_match_id(match_id).items() if k not in given}
+    derived = {k: v for k, v in derive_from_match_id(match_id, teams).items() if k not in given}
     out: dict[str, Any] = {f: None for f in CATALOG_FIELDS}
     out.update(derived)
     out.update(given)
@@ -105,7 +145,9 @@ def incomplete(match_ids: list[str]) -> dict[str, list[str]]:
     out = {}
     for mid in match_ids:
         e = entry_for(mid, cat)
-        gaps = [f for f in ("event", "played_on") if e.get(f) in (None, "")]
+        # An event slug read off the file name is enough to group by; a date never is derivable.
+        gaps = [f for f in ("event", "played_on")
+                if e.get(f) in (None, "") or (f == "event" and e["meta_source"] == "derived")]
         if gaps:
             out[mid] = gaps
     return out
