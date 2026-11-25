@@ -132,6 +132,17 @@ def test_an_unreadable_zone_file_reads_as_missing():
     Z._path(name).unlink(missing_ok=True)
 
 
+def test_the_silhouette_marks_only_cells_a_player_has_been_in():
+    z = Z.fit("de_shape", _positions(), _bomb(), ["m"])
+    assert len(z.occupancy) == Z.OCCUPANCY_GRID
+    assert all(len(row) == Z.OCCUPANCY_GRID for row in z.occupancy)
+    filled = sum(row.count("1") for row in z.occupancy)
+    assert 0 < filled < Z.OCCUPANCY_GRID ** 2, "the whole map cannot be walkable"
+    # The fixture only has players near the two spawns, at opposite corners of the extent.
+    assert z.occupancy[0][0] == "1" and z.occupancy[-1][-1] == "1"
+    assert z.occupancy[0][-1] == "0" and z.occupancy[-1][0] == "0"
+
+
 def test_as_frame_publishes_one_row_per_anchor():
     z = Z.fit("de_fixture", _positions(), _bomb(), ["m1", "m2"])
     f = Z.as_frame([z])

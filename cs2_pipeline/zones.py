@@ -43,6 +43,10 @@ _MID_MIN_DIST = 900.0
 #: An anchor backed by fewer observations than this is kept but reported as weak.
 MIN_SUPPORT = 3
 
+#: Resolution of the walkable-area silhouette: where players have actually been. The official
+#: radar image cannot be downloaded here, and this is derived from the demos themselves.
+OCCUPANCY_GRID = 96
+
 
 @dataclass
 class MapZones:
@@ -53,6 +57,8 @@ class MapZones:
     extent: list[float]                      # x_min, y_min, x_max, y_max
     cell_size: float = CELL_SIZE
     fitted_from: list[str] = field(default_factory=list)
+    #: One string per row, bottom row first, '1' where a player has been observed.
+    occupancy: list[str] = field(default_factory=list)
 
     @property
     def names(self) -> list[str]:
@@ -131,7 +137,8 @@ def fit(map_name: str, positions: pd.DataFrame, bomb: pd.DataFrame,
 
     extent = [float(pos["x"].min()), float(pos["y"].min()), float(pos["x"].max()), float(pos["y"].max())]
     zones = MapZones(map_name=map_name, anchors=anchors, support=support, extent=extent,
-                     fitted_from=sorted(match_ids or pos["match_id"].unique().tolist()))
+                     fitted_from=sorted(match_ids or pos["match_id"].unique().tolist()),
+                     occupancy=_occupancy(pos, extent))
 
     # Mid is whatever is left: the ground far from every anchor so far.
     if anchors:
@@ -147,6 +154,17 @@ def fit(map_name: str, positions: pd.DataFrame, bomb: pd.DataFrame,
     log.info("zones[%s]: %s%s", map_name, ", ".join(zones.names),
              f" (weak support: {weak})" if weak else "")
     return zones
+
+
+def _occupancy(pos: pd.DataFrame, extent: list[float], grid: int = OCCUPANCY_GRID) -> list[str]:
+    """Silhouette of the walkable area: a grid marking every cell a player has been seen in."""
+    x0, y0, x1, y1 = extent
+    w, h = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
+    i = np.clip(((pos["x"].to_numpy(float) - x0) / w * grid).astype(int), 0, grid - 1)
+    j = np.clip(((pos["y"].to_numpy(float) - y0) / h * grid).astype(int), 0, grid - 1)
+    seen = np.zeros((grid, grid), dtype=bool)
+    seen[j, i] = True
+    return ["".join("1" if v else "0" for v in row) for row in seen]
 
 
 def ensure(map_name: str, positions: pd.DataFrame, bomb: pd.DataFrame,

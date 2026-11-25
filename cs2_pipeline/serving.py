@@ -104,7 +104,12 @@ def map_payload(zones: MapZones) -> dict:
                         "support": zones.support.get(name, 0), "weak": name in zones.weak()})
     return {"map_name": zones.map_name, "extent": zones.extent, "cell_size": zones.cell_size,
             "zones": anchors, "fitted_from": zones.fitted_from,
-            "note": "Zones are derived from plants and spawns in the demos, not official callouts."}
+            # Silhouette of where players have actually been: the page draws the map from this,
+            # so it needs no radar image. One string per row, bottom row first.
+            "occupancy": zones.occupancy,
+            "note": "Zones and the map outline are derived from the demos themselves "
+                    "(plants, spawns and where players walked), not from official callouts "
+                    "or a radar image."}
 
 
 def round_payload(round_num: int, tables: dict[str, pd.DataFrame], norm: Normaliser,

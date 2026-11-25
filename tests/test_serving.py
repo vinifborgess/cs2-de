@@ -39,7 +39,17 @@ def test_map_payload_carries_the_extent_and_flags_weak_anchors():
     a = {z["zone"]: z for z in p["zones"]}
     assert a["A site"]["x"] == 0.75 and a["A site"]["y"] == 0.5 and a["A site"]["weak"] is False
     assert a["B site"]["weak"] is True and a["B site"]["world_x"] == -100.0
-    assert "not official callouts" in p["note"]
+    assert "derived from the demos themselves" in p["note"]
+
+
+def test_map_payload_carries_the_derived_silhouette():
+    from cs2_pipeline.zones import OCCUPANCY_GRID, fit
+    from tests.test_zones import _bomb, _positions
+
+    p = map_payload(fit("de_shape", _positions(), _bomb(), ["m"]))
+    assert len(p["occupancy"]) == OCCUPANCY_GRID
+    assert all(set(row) <= {"0", "1"} for row in p["occupancy"])
+    assert any("1" in row for row in p["occupancy"])
 
 
 def _round(mid="srv-base", seed=81, rnd=3, **kw):
