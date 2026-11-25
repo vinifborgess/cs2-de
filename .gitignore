@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Published bundle scratch (page + exported JSON), rebuilt by --serve-only.
+/pub/

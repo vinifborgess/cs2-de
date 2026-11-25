@@ -138,6 +138,68 @@ def test_export_leaves_out_a_match_that_fails_quality_and_says_which():
     assert not (out / "srv-bad").exists()
 
 
+#: What web/index.html reads. Changing a name here breaks the page, so the page and this list
+#: have to move together - that is the point of the test below.
+PAGE_CONTRACT = {
+    "index": ["matches", "sample_hz", "skipped", "maps"],
+    "match": ["match_id", "map_name", "team_a", "team_b", "score_a", "score_b", "n_rounds",
+              "rounds", "event"],
+    "round_row": ["round_num", "half", "ct_team", "t_team", "winner", "winner_team", "reason",
+                  "duration_s", "bomb_site", "planted", "plant_t_s", "fb_team", "fb_player",
+                  "fb_victim", "fb_weapon", "fb_t_s", "fb_won", "fb_zone", "ct_buy", "t_buy"],
+    "map": ["map_name", "extent", "zones", "occupancy", "note"],
+    "zone": ["zone", "x", "y", "support", "weak"],
+    "payload": ["round_num", "players", "kills", "bomb", "smokes", "blinds", "grenades"],
+    "player": ["steamid", "name", "team", "side", "track"],
+    "kill": ["t_s", "kill_order", "is_first_kill", "is_post_round", "attacker_name",
+             "attacker_side", "victim_name", "victim_side", "weapon", "headshot",
+             "attacker_nx", "attacker_ny", "victim_nx", "victim_ny"],
+}
+
+
+def test_the_exported_shape_is_the_one_the_page_reads():
+    import tempfile
+    from pathlib import Path
+
+    out = Path(tempfile.mkdtemp(prefix="cs2-contract-"))
+    make_match("srv-contract-vs-b-m1-test", seed=99)
+    bronze_to_silver("srv-contract-vs-b-m1-test", force=True)
+    export(["srv-contract-vs-b-m1-test"], out_dir=out)
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    match = index["matches"][0]
+    row = match["rounds"][0]
+    mp = json.loads((out / "maps" / "de_test.json").read_text(encoding="utf-8"))
+    payload = json.loads((out / match["match_id"] / f"r{row['round_num']}.json").read_text(encoding="utf-8"))
+    sample = {"index": index, "match": match, "round_row": row, "map": mp, "zone": mp["zones"][0],
+              "payload": payload, "player": payload["players"][0], "kill": payload["kills"][0]}
+    for part, fields in PAGE_CONTRACT.items():
+        missing = [f for f in fields if f not in sample[part]]
+        assert not missing, f"web/index.html reads {part}.{missing} and the export no longer has it"
+
+    # Tracks are [t_s, x, y, health] with the coordinates already normalised.
+    t, x, y, hp = payload["players"][0]["track"][0]
+    assert isinstance(t, float) and 0 <= x <= 1 and 0 <= y <= 1 and 0 <= hp <= 100
+    # Every round the index promises has a file.
+    for r in match["rounds"]:
+        assert (out / match["match_id"] / f"r{r['round_num']}.json").exists()
+
+
+def test_the_replay_agrees_with_the_kill_feed():
+    """The victim is alive in the last sample before the kill and dead in the first one after.
+
+    Stated against the samples themselves rather than a fixed number of seconds, so it holds
+    whatever rate the tracks were thinned to.
+    """
+    tables, p = _round("srv-agree", seed=98)
+    first = next(k for k in p["kills"] if k["is_first_kill"])
+    victim = next(pl for pl in p["players"] if pl["name"] == first["victim_name"])
+    before = [s for s in victim["track"] if s[0] <= first["t_s"]]
+    after = [s for s in victim["track"] if s[0] > first["t_s"]]
+    assert before and before[-1][3] > 0, "the victim should be alive going into the kill"
+    assert after and after[0][3] == 0, "and dead in the next sample"
+
+
 def test_json_holds_no_nan_and_every_value_is_serialisable():
     tables, p = _round("srv-nan", seed=97)
     text = json.dumps(p)                                   # would raise on a pandas NA
