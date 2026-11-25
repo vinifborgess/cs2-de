@@ -193,7 +193,11 @@ def clean_rounds_base(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.drop(columns=["reason"], errors="ignore").rename(
         columns={"freeze_end_tick": "freeze_end", "reason_name": "reason"})
     df["winner"] = normalize_side(df["winner_side"])
-    keep = (~df["is_knife_round"].fillna(False)) & (df["start_tick"] > 0) & df["winner"].isin(["CT", "T"])
+    # A playable round needs a freeze phase inside it and a live phase after it. Tick 0 is a
+    # legitimate start: when the recording begins at the first round, that round starts there.
+    playable = ((df["start_tick"] >= 0) & (df["start_tick"] <= df["freeze_end"])
+                & (df["freeze_end"] < df["end_tick"]))
+    keep = (~df["is_knife_round"].fillna(False)) & playable & df["winner"].isin(["CT", "T"])
     df = df[keep].sort_values("start_tick")
     # A restart (mp_restartgame, a replayed round) leaves two rows for the same round
     # number. The last one is the round that was actually played out.

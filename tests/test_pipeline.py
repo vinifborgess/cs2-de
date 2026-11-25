@@ -212,6 +212,30 @@ def test_oversized_side_group_is_not_treated_as_a_team():
     assert out["team_clan_name"].isna().all()
 
 
+def test_round_one_starting_at_tick_zero_is_kept():
+    from cs2_pipeline.silver import clean_rounds_base
+    # Two real HLTV demos (Dust2, Mirage) start recording exactly at round 1, so its start_tick
+    # is 0. Dropping it cost a round and shifted the score and the halves by one.
+    raw = pd.DataFrame({
+        "round_num": [1, 2], "start_tick": [0, 18099], "freeze_end_tick": [12417, 19379],
+        "end_tick": [17651, 25085], "winner_side": ["terrorist", "counter-terrorist"],
+        "is_knife_round": [False, False], "reason": [9, 8], "reason_name": ["terrorists_win", "ct_win"]})
+    out = clean_rounds_base(raw)
+    assert out["round_num"].tolist() == [1, 2] and out["start_tick"].tolist() == [0, 18099]
+
+
+def test_rounds_without_a_live_phase_are_dropped():
+    from cs2_pipeline.silver import clean_rounds_base
+    raw = pd.DataFrame({
+        "round_num": [1, 2, 3, 4],
+        "start_tick": [0, 100, 300, -5],          # 2: freeze after the end; 3: no live phase; 4: negative
+        "freeze_end_tick": [50, 250, 400, 10],
+        "end_tick": [200, 200, 400, 100],
+        "winner_side": ["terrorist"] * 4, "is_knife_round": [False] * 4,
+        "reason": [9] * 4, "reason_name": ["terrorists_win"] * 4})
+    assert clean_rounds_base(raw)["round_num"].tolist() == [1]
+
+
 def test_restarted_rounds_keep_only_the_round_that_was_played_out():
     from cs2_pipeline.silver import clean_rounds_base
     raw = pd.DataFrame({
