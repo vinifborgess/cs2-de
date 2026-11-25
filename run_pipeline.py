@@ -13,6 +13,9 @@ python run_pipeline.py --all
 # Só reprocessar Gold a partir da Silver já existente (rápido):
 python run_pipeline.py --gold-only
 
+# Só reexportar o JSON estático que o replay consome:
+python run_pipeline.py --serve-only
+
 # Forçar reparsing/relimpeza mesmo se já houver cache:
 python run_pipeline.py --all --force
 
@@ -36,7 +39,8 @@ from pathlib import Path
 from cs2_pipeline.config import RAW_DIR, get_logger
 from cs2_pipeline.bronze import parse_demo_to_bronze
 from cs2_pipeline.silver import bronze_to_silver, load_silver_lake, quarantine, release
-from cs2_pipeline.gold import run_gold
+from cs2_pipeline.gold import run_gold, run_gold_facts
+from cs2_pipeline.serving import export as export_serving
 from cs2_pipeline.quality import list_matches, run_checks, summarize
 
 log = get_logger()
@@ -64,6 +68,14 @@ def process_one(demo_path: Path, match_id: str, force: bool) -> bool:
         log.error("Falha em '%s' (%s) — pulando. Motivo: %s",
                   match_id, demo_path.name, exc)
         return False
+
+
+def run_all_gold(*, serve: bool = True) -> None:
+    """Gold over the whole lake: statistical power comes from aggregating across matches."""
+    run_gold(load_silver_lake(("kills", "rounds")))  # First Blood report
+    run_gold_facts()                                  # fact tables, team metrics, findings, insights.md
+    if serve:
+        export_serving()                              # static JSON for the replay page
 
 
 def run_quality(match_ids: list[str], *, strict: bool = False) -> int:
@@ -94,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true",
                     help="Apenas checa a qualidade da Silver (todas as partidas, ou --match-id).")
     ap.add_argument("--strict", action="store_true", help="Com --check: avisos também reprovam.")
+    ap.add_argument("--no-serve", action="store_true",
+                    help="Não exporta o JSON estático do replay (data/serving).")
+    ap.add_argument("--serve-only", action="store_true",
+                    help="Só reexporta o JSON estático do replay a partir da Silver existente.")
     args = ap.parse_args(argv)
 
     t0 = time.time()
@@ -101,9 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return run_quality([args.match_id] if args.match_id else list_matches(), strict=args.strict)
 
+    if args.serve_only:
+        export_serving()
+        log.info("Concluído em %.1fs.", time.time() - t0)
+        return 0
+
     if args.gold_only:
-        silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
-        run_gold(silver)
+        run_all_gold(serve=not args.no_serve)
         log.info("Concluído em %.1fs.", time.time() - t0)
         return 0
 
@@ -134,8 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Gold sempre roda sobre o lake inteiro (poder estatístico vem da agregação).
-    silver = load_silver_lake(("kills", "rounds"))  # Gold only needs these
-    run_gold(silver)
+    run_all_gold(serve=not args.no_serve)
     log.info("Concluído em %.1fs.", time.time() - t0)
     return 2 if failed else 0
 

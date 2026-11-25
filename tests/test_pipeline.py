@@ -4,11 +4,7 @@ Run with ``python -m tests.test_pipeline`` (or ``pytest``). Set CS2_TEST_DEMO to
 real .dem path to also run an end-to-end check on it.
 """
 import os
-import tempfile
 from pathlib import Path
-
-# The data lake location is read at import time: point it at a scratch directory first.
-os.environ["CS2_DATA_DIR"] = tempfile.mkdtemp(prefix="cs2-test-")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -50,6 +46,7 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
     }, schema_overrides={"steamid": pl.UInt64})
 
     rounds, kills, damages, snaps, smokes, econ, bomb = [], [], [], [], [], [], []
+    blinds, grenades, shots, items = [], [], [], []
     expected_first, expected_kills = {}, 0
 
     def kill_row(tick, a, v, weapon="ak47", a_side=None, v_side=None):
@@ -69,6 +66,7 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
                    "winner_side": SIDE["CT"], "reason": 7, "reason_name": "bomb_defused", "is_knife_round": True})
     tick += FREEZE + 2400
 
+    wins = {"Alpha": 0, "Bravo": 0}
     for rnd in range(1, n_rounds + 1):
         start, fe = tick, tick + FREEZE
         end = fe + LIVE
@@ -76,6 +74,11 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         other = "Bravo" if fb_team == "Alpha" else "Alpha"
         fb_side = side_of(fb_team, rnd)
         win_side = fb_side if rng.random() < fb_win_prob else ("T" if fb_side == "CT" else "CT")
+        if rnd == n_rounds and wins["Alpha"] != wins["Bravo"]:
+            # An even-length match cannot end level: the last round goes to the leader.
+            leader = max(wins, key=wins.get)
+            win_side = side_of(leader, rnd)
+        wins["Alpha" if side_of("Alpha", rnd) == win_side else "Bravo"] += 1
         rounds.append({"round_num": rnd, "start_tick": start, "freeze_end_tick": fe, "end_tick": end,
                        "official_end_tick": end + 448, "winner_side": SIDE[win_side], "reason": 9,
                        "reason_name": "terrorists_win" if win_side == "T" else "ct_win", "is_knife_round": False})
@@ -110,6 +113,37 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         smokes.append({"start_tick": fe + 500, "end_tick": fe + 1900, "thrower_name": name_of[teams["Alpha"][0]],
                        "thrower_steamid": teams["Alpha"][0], "thrower_side": SIDE[side_of("Alpha", rnd)],
                        "entity_id": 2, "entity_serial": 2, "x": 7.0, "y": 8.0, "z": 9.0})
+
+        # Utility, one of each shape Silver has to handle: an enemy flash, a self-flash and a
+        # team flash; a grenade sampled over several ticks; shots including utility and knife;
+        # purchases in freeze time and a pickup once the round is live.
+        flasher, mate = teams[fb_team][0], teams[fb_team][1]
+        enemy = teams[other][0]
+        for victim, dur in ((enemy, 2.5), (flasher, 0.4), (mate, 1.2)):
+            blinds.append({"tick": fe + 300, "attacker_steamid": flasher, "attacker_name": name_of[flasher],
+                           "attacker_side": SIDE[side_of(fb_team, rnd)], "attacker_x": 1.0, "attacker_y": 2.0,
+                           "attacker_z": 3.0, "victim_steamid": victim, "victim_name": name_of[victim],
+                           "victim_side": SIDE[side_of(team_of[victim], rnd)], "victim_x": 4.0, "victim_y": 5.0,
+                           "victim_z": 6.0, "duration": dur, "attacker_entity_id": 1, "attacker_entity_serial": 1,
+                           "victim_entity_id": 2, "victim_entity_serial": 2})
+        for i, t in enumerate((fe + 250, fe + 280, fe + 310)):   # one throw, three samples
+            grenades.append({"tick": t, "thrower_name": name_of[flasher], "thrower_steamid": flasher,
+                             "thrower_side": SIDE[side_of(fb_team, rnd)], "type": "flashbang",
+                             "entity_id": 7, "entity_serial": 7, "x": 10.0 + i, "y": 20.0 + i, "z": 30.0,
+                             "start_tick": fe + 250, "end_tick": fe + 310})
+        for w in ("weapon_ak47", "weapon_flashbang", "weapon_knife_karambit"):
+            shots.append({"tick": fe + 200, "steamid": flasher, "name": name_of[flasher],
+                          "side": SIDE[side_of(fb_team, rnd)], "weapon": w, "scoped": False,
+                          "inaccuracy": 0.01, "num_bullets_remaining": 20, "entity_id": 1, "entity_serial": 1,
+                          "x": 1.0, "y": 2.0, "z": 3.0, "pitch": 0.0, "yaw": 90.0})
+        items.append({"tick": fe - 320, "action": "purchase", "steamid": flasher, "name": name_of[flasher],
+                      "side": SIDE[side_of(fb_team, rnd)], "item": "ak47", "cost": 2700, "entity_id": 1,
+                      "entity_serial": 1, "x": 1.0, "y": 2.0, "z": 3.0,
+                      "original_owner_steamid": flasher, "near_buy_zone": True})
+        items.append({"tick": fe + 600, "action": "pickup", "steamid": mate, "name": name_of[mate],
+                      "side": SIDE[side_of(fb_team, rnd)], "item": "awp", "cost": 0, "entity_id": 2,
+                      "entity_serial": 2, "x": 4.0, "y": 5.0, "z": 6.0,
+                      "original_owner_steamid": flasher, "near_buy_zone": False})
         for side in ("CT", "T"):
             econ.append({"round_num": rnd, "side": SIDE[side], "equipment_value": 20000, "buy_type": "full", "n_players": 5})
         for t in (fe - 64, fe, fe + 1000, end):  # first one is freeze time: must be dropped
@@ -133,6 +167,11 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         "bomb": pl.DataFrame(bomb) if bomb else pl.DataFrame(schema={"tick": pl.Int64, "event": pl.String, "bombsite": pl.String}),
         "smokes": pl.DataFrame(smokes),
         "round_economy": pl.DataFrame(econ),
+        "blinds": pl.DataFrame(blinds, schema_overrides={"attacker_steamid": pl.UInt64, "victim_steamid": pl.UInt64}),
+        "grenades": pl.DataFrame(grenades, schema_overrides={"thrower_steamid": pl.UInt64}),
+        "shots": pl.DataFrame(shots, schema_overrides={"steamid": pl.UInt64}),
+        "item_events": pl.DataFrame(items, schema_overrides={"steamid": pl.UInt64,
+                                                             "original_owner_steamid": pl.UInt64}),
         "snapshots": pl.DataFrame(snaps),
     }
     write_bronze_tables(match_id, tables, {"demo_sha256": "synthetic"})
@@ -155,6 +194,122 @@ def test_normalize_side():
     assert out.tolist()[:4] == ["T", "CT", "CT", "T"] and out.isna().tolist()[4:] == [True, True]
 
 
+def test_blank_clan_names_are_missing_not_a_team():
+    from cs2_pipeline.silver import clean_players
+    raw = pd.DataFrame({"steamid": ["0", "1", "2", "3", "4"], "name": ["CSTV", "a", "b", "c", "d"],
+                        "team_clan_name": [None, "  ", "", "Alpha ", None]})
+    out = clean_players(raw, "m")
+    assert out["steamid"].tolist() == ["3"] and out["team"].tolist() == ["Alpha"]
+
+
+def _rewrite_clan_names(match_id: str, fn) -> None:
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / match_id / "players.parquet"
+    df = pl.read_parquet(path)
+    pl_names = [fn(n) for n in df["team_clan_name"].to_list()]
+    df.with_columns(pl.Series("team_clan_name", pl_names, dtype=pl.String)).write_parquet(path)
+
+
+def test_teams_are_inferred_from_starting_sides_when_names_are_missing():
+    make_match("syn-noname", seed=11)
+    _rewrite_clan_names("syn-noname", lambda n: None)
+    s = bronze_to_silver("syn-noname", force=True)
+    # Alpha starts CT -> "Team A"; the match must keep its 24 rounds and a real score.
+    assert set(s["players"]["team"]) == {"Team A", "Team B"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+    m = s["matches"].iloc[0]
+    assert {m["team_a"], m["team_b"]} == {"Team A", "Team B"}
+    assert m["score_a"] + m["score_b"] == 24
+    r = s["rounds"]
+    assert (r.loc[r["round_num"] <= 12, "ct_team"] == "Team A").all()      # halftime swap survives
+    assert (r.loc[r["round_num"] > 12, "ct_team"] == "Team B").all()
+
+
+def test_partial_names_are_completed_from_side_mates_and_never_invented_over_real_ones():
+    make_match("syn-partial", seed=12)
+    seen = {"n": 0}
+
+    def drop_two(n):  # blank two of Alpha's players and one of Bravo's, keep the rest
+        seen["n"] += 1
+        return None if seen["n"] in (2, 3, 8) else n
+    _rewrite_clan_names("syn-partial", drop_two)
+    s = bronze_to_silver("syn-partial", force=True)
+    assert set(s["players"]["team"]) == {"Alpha", "Bravo"}
+    assert s["players"]["team"].value_counts().tolist() == [5, 5]
+
+
+def test_oversized_side_group_is_not_treated_as_a_team():
+    from cs2_pipeline.silver import _fill_team_names
+    df = pd.DataFrame({"steamid": [str(i) for i in range(7)], "team_clan_name": [None] * 7})
+    out = _fill_team_names(df, {str(i): "CT" for i in range(7)})
+    assert out["team_clan_name"].isna().all()
+
+
+def test_round_one_starting_at_tick_zero_is_kept():
+    from cs2_pipeline.silver import clean_rounds_base
+    # Two real HLTV demos (Dust2, Mirage) start recording exactly at round 1, so its start_tick
+    # is 0. Dropping it cost a round and shifted the score and the halves by one.
+    raw = pd.DataFrame({
+        "round_num": [1, 2], "start_tick": [0, 18099], "freeze_end_tick": [12417, 19379],
+        "end_tick": [17651, 25085], "winner_side": ["terrorist", "counter-terrorist"],
+        "is_knife_round": [False, False], "reason": [9, 8], "reason_name": ["terrorists_win", "ct_win"]})
+    out = clean_rounds_base(raw)
+    assert out["round_num"].tolist() == [1, 2] and out["start_tick"].tolist() == [0, 18099]
+
+
+def test_rounds_without_a_live_phase_are_dropped():
+    from cs2_pipeline.silver import clean_rounds_base
+    raw = pd.DataFrame({
+        "round_num": [1, 2, 3, 4],
+        "start_tick": [0, 100, 300, -5],          # 2: freeze after the end; 3: no live phase; 4: negative
+        "freeze_end_tick": [50, 250, 400, 10],
+        "end_tick": [200, 200, 400, 100],
+        "winner_side": ["terrorist"] * 4, "is_knife_round": [False] * 4,
+        "reason": [9] * 4, "reason_name": ["terrorists_win"] * 4})
+    assert clean_rounds_base(raw)["round_num"].tolist() == [1]
+
+
+def test_restarted_rounds_keep_only_the_round_that_was_played_out():
+    from cs2_pipeline.silver import clean_rounds_base
+    raw = pd.DataFrame({
+        "round_num": [1, 1, 2], "start_tick": [1000, 5000, 9000], "freeze_end_tick": [1500, 5500, 9500],
+        "end_tick": [2000, 8000, 12000], "winner_side": ["terrorist", "counter-terrorist", "terrorist"],
+        "is_knife_round": [False, False, False], "reason": [1, 1, 1], "reason_name": ["a", "b", "c"]})
+    out = clean_rounds_base(raw)
+    assert out["round_num"].tolist() == [1, 2] and out["start_tick"].tolist() == [5000, 9000]
+    assert out["winner"].tolist() == ["CT", "T"]
+
+
+def test_restarted_round_does_not_break_a_whole_match():
+    make_match("syn-restart", seed=13)
+    from cs2_pipeline.config import BRONZE_DIR
+    path = BRONZE_DIR / "syn-restart" / "rounds.parquet"
+    r = pl.read_parquet(path)
+    first = r.filter(pl.col("round_num") == 1)
+    ghost = first.with_columns(*(pl.col(c) - 3 for c in ("start_tick", "freeze_end_tick", "end_tick") if c in first.columns))
+    pl.concat([ghost, r]).sort("start_tick").write_parquet(path)
+    s = bronze_to_silver("syn-restart", force=True)
+    assert len(s["rounds"]) == 24 and s["rounds"]["round_num"].is_unique
+
+
+def test_assign_round_can_keep_post_round_events_flagged():
+    from cs2_pipeline.silver import assign_round
+    rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [0, 1000], "end_tick": [800, 1800],
+                           "official_end_tick": [900, 1900]})
+    ev = pd.DataFrame({"tick": [400, 850, 950, 1500, 1850]})   # 950 is between the rounds
+    out = assign_round(ev, rounds, include_post_round=True)
+    assert out["tick"].tolist() == [400, 850, 1500, 1850]
+    assert out["is_post_round"].tolist() == [False, True, False, True]
+    assert assign_round(ev, rounds)["tick"].tolist() == [400, 1500]      # default drops them
+    # A stale official_end_tick (before the round's own end) must not shrink the live window,
+    # and must not turn live ticks into post-round ones; events past the end are then dropped.
+    short = rounds.assign(official_end_tick=[700, 1700])
+    out = assign_round(pd.DataFrame({"tick": [400, 750, 850, 1500, 1750, 1850]}), short,
+                       include_post_round=True)
+    assert out["tick"].tolist() == [400, 750, 1500, 1750]
+    assert not out["is_post_round"].any()
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})
@@ -171,7 +326,14 @@ def test_silver_contracts_noise_and_sides():
 
     r, k = s["rounds"], s["kills"]
     assert len(r) == exp["n_rounds"] and 0 not in r["round_num"].tolist()  # knife round dropped
-    assert len(k) == exp["n_kills"]                                        # world, team and post-round kills removed
+    live = k[~k["is_post_round"]]
+    assert len(live) == exp["n_kills"]                                     # world and team kills removed
+    # The generator plays one kill per round after the round is decided: kept, but flagged,
+    # with no kill_order, so it can never be mistaken for part of the round.
+    post = k[k["is_post_round"]]
+    assert len(post) == exp["n_rounds"] and post["kill_order"].isna().all()
+    assert not post["is_first_kill"].any()
+    k = live
     assert set(k["attacker_side"]) <= {"CT", "T"} and (k["attacker_team"] != k["victim_team"]).all()
     assert (k["t_s"] >= 0).all() and k["is_first_kill"].sum() == exp["n_rounds"]
     first = k[k["is_first_kill"]].set_index("round_num")["attacker_name"].to_dict()
@@ -186,6 +348,83 @@ def test_silver_contracts_noise_and_sides():
     # Freeze-time snapshots are dropped: 3 live samples x 10 players per round.
     assert len(s["positions"]) == exp["n_rounds"] * 3 * 10 and (s["positions"]["t_s"] >= 0).all()
     assert s["positions"]["steamid"].str.len().eq(17).all()
+
+
+def test_list_matches_and_read_match_respect_quarantine():
+    from cs2_pipeline.silver import list_matches, quarantine, read_match, release
+    make_match("syn-list", seed=31, n_rounds=12)
+    bronze_to_silver("syn-list", force=True)
+    assert "syn-list" in list_matches()
+    t = read_match("syn-list", ("rounds", "kills"))
+    assert set(t) == {"rounds", "kills"} and len(t["rounds"]) == 12
+    assert set(read_match("syn-list")) == set(SILVER_SCHEMAS)
+    quarantine("syn-list", ["test"])
+    try:
+        assert "syn-list" not in list_matches() and "syn-list" in list_matches(include_quarantined=True)
+    finally:
+        release("syn-list")
+
+
+def test_utility_tables_reach_silver_with_their_contracts():
+    exp = make_match("syn-util", seed=71)
+    s = bronze_to_silver("syn-util", force=True)
+    n = exp["n_rounds"]
+    b, g, sh, ie = s["blinds"], s["grenades"], s["shots"], s["item_events"]
+    for name, df in (("blinds", b), ("grenades", g), ("shots", sh), ("item_events", ie)):
+        assert list(df.columns) == list(SILVER_SCHEMAS[name]), name
+        assert set(df["round_num"]) == set(range(1, n + 1)), name
+
+    # Three flashes a round: one enemy, one self, one team-mate.
+    assert len(b) == 3 * n
+    assert b["is_self_flash"].sum() == n and b["is_team_flash"].sum() == n
+    assert not (b["is_self_flash"] & b["is_team_flash"]).any()
+    assert (b.loc[~b["is_self_flash"] & ~b["is_team_flash"], "duration"] == 2.5).all()
+
+    # One grenade a round, collapsed from three trajectory samples into one throw.
+    assert len(g) == n and (g["n_samples"] == 3).all()
+    assert (g["grenade_type"] == "flashbang").all()
+    assert (g["throw_x"] == 10.0).all() and (g["land_x"] == 12.0).all()   # first and last sample
+    assert (g["end_tick"] > g["start_tick"]).all() and (g["t_end_s"] > g["t_start_s"]).all()
+
+    # Three shots a round, with the shots table's weapon_ prefix removed.
+    assert len(sh) == 3 * n and not sh["weapon"].str.startswith("weapon_").any()
+    assert sh["is_utility"].sum() == n and sh["is_knife"].sum() == n
+    assert set(sh["weapon"]) == {"ak47", "flashbang", "knife_karambit"}
+
+    # Buying happens in freeze time, so item events keep a negative clock; picking up does not.
+    assert len(ie) == 2 * n
+    buys = ie[ie["action"] == "purchase"]
+    assert len(buys) == n and buys["is_freeze_time"].all() and (buys["t_s"] < 0).all()
+    assert (buys["cost"] == 2700).all()
+    picks = ie[ie["action"] == "pickup"]
+    assert not picks["is_freeze_time"].any() and (picks["t_s"] > 0).all()
+
+
+def test_grenade_trajectories_collapse_to_one_row_per_throw():
+    from cs2_pipeline.silver import clean_grenades
+    rounds = pd.DataFrame({"round_num": [1], "start_tick": [0], "freeze_end": [100],
+                           "end_tick": [1000], "official_end_tick": [1100]})
+    raw = pd.DataFrame([
+        # Two throws by the same player, one of them re-using the entity id after it expired.
+        {"tick": 200, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 1.0, "y": 1.0, "z": 1.0},
+        {"tick": 230, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 2.0, "y": 2.0, "z": 2.0},
+        {"tick": 260, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 3.0, "y": 3.0, "z": 3.0},
+        {"tick": 400, "entity_id": 5, "entity_serial": 2, "start_tick": 400, "end_tick": 420,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "he",
+         "x": 9.0, "y": 9.0, "z": 9.0},
+    ])
+    out = clean_grenades(raw, rounds, {"1": "Alpha"}, 64.0, "m")
+    assert len(out) == 2
+    smoke = out[out["grenade_type"] == "smoke"].iloc[0]
+    assert (smoke["throw_x"], smoke["land_x"], smoke["n_samples"]) == (1.0, 3.0, 3)
+    assert out["thrower_team"].eq("Alpha").all()
+    assert clean_grenades(raw.iloc[0:0], rounds, {}, 64.0, "m").empty
 
 
 def test_silver_is_idempotent():
@@ -300,6 +539,18 @@ def test_failed_quality_checks_quarantine_the_match():
         assert "qa-bad" not in quarantined()
     finally:
         run_pipeline.parse_demo_to_bronze, run_pipeline.run_checks = real_parse, real_checks
+
+
+def test_gold_only_command_writes_every_gold_output():
+    import run_pipeline
+    from cs2_pipeline.config import GOLD_DIR
+    make_match("syn-goldcli", seed=33)
+    bronze_to_silver("syn-goldcli", force=True)
+    for name in ("report.md", "insights.md", "fact_round.parquet", "team_metrics.parquet"):
+        (GOLD_DIR / name).unlink(missing_ok=True)
+    assert run_pipeline.main(["--gold-only"]) == 0
+    for name in ("report.md", "insights.md", "fact_round.parquet", "fact_player.parquet", "team_metrics.parquet"):
+        assert (GOLD_DIR / name).exists(), name
 
 
 def test_gold_end_to_end_on_the_lake():

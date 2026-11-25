@@ -48,6 +48,8 @@ def _rounds_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     dup = r["round_num"].duplicated().sum()
     out.append(_c("rounds.unique_round_num", "error", dup == 0, f"{dup} duplicated round numbers"))
     nums = sorted(r["round_num"])
+    out.append(_c("rounds.starts_at_round_1", "error", nums[0] == 1,
+                  f"first round is {nums[0]}: the demo starts mid-match, so scores and sides would be wrong"))
     gaps = sorted(set(range(nums[0], nums[-1] + 1)) - set(nums))
     out.append(_c("rounds.contiguous", "warning", not gaps, f"missing rounds {gaps[:10]}"))
     bad_winner = (~r["winner"].isin(["CT", "T"]) | r["winner_team"].isna()).sum()
@@ -56,7 +58,15 @@ def _rounds_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("rounds.teams_distinct", "error", same == 0, f"{same} rounds with missing or equal CT/T team"))
     odd = (~r["duration_s"].between(0, 200, inclusive="neither")).sum()
     out.append(_c("rounds.duration_plausible", "warning", odd == 0, f"{odd} rounds outside (0, 200] s"))
+    # A round won by bombing or defusing needs a plant event; if the Bomb table lost
+    # its events the site would silently read "none" for every such round.
+    needs_plant = r["reason"].isin(["target_bombed", "bomb_defused"])
+    unplanted = (needs_plant & (r["bomb_site"] == "none")).sum()
+    out.append(_c("rounds.bomb_reason_has_plant", "error", unplanted == 0,
+                  f"{unplanted} rounds ended by bomb explosion/defuse without a recorded plant"))
     row = m.iloc[0]
+    out.append(_c("matches.has_winner", "warning", max(row["score_a"], row["score_b"]) >= 13,
+                  f"score {row['score_a']}-{row['score_b']}: nobody reached 13, the demo may be cut short"))
     out.append(_c("matches.score_consistent", "error",
                   row["score_a"] + row["score_b"] == row["n_rounds"] == len(r),
                   f"score {row['score_a']}+{row['score_b']} vs {row['n_rounds']} / {len(r)} rounds"))
@@ -71,6 +81,14 @@ def _kills_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     if k.empty:
         return [_c("kills.not_empty", "error", False, "no kills")]
     out: list[Check] = []
+    # Kills after the round was decided obey none of the rules below: they carry no order,
+    # the victim may already have died in the live phase and they can exceed ten per round.
+    post = k["is_post_round"].fillna(False).astype(bool) if "is_post_round" in k else pd.Series(False, index=k.index)
+    out.append(_c("kills.post_round_has_no_order", "error", k.loc[post, "kill_order"].isna().all(),
+                  f"{int(k.loc[post, 'kill_order'].notna().sum())} post-round kills carry a kill_order"))
+    k = k[~post]
+    if k.empty:
+        return out + [_c("kills.not_empty", "error", False, "no kills in the live phase of any round")]
     firsts = k.groupby("round_num")["is_first_kill"].sum()
     out.append(_c("kills.one_first_kill_per_round", "error", (firsts == 1).all(), f"rounds with != 1 first kill: {list(firsts[firsts != 1].index)[:10]}"))
     contiguous = k.groupby("round_num")["kill_order"].apply(lambda s: sorted(s) == list(range(1, len(s) + 1)))
@@ -81,7 +99,7 @@ def _kills_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("kills.at_most_10_per_round", "error", (per_round <= 10).all(), f"max {per_round.max()}"))
     dur = k["round_num"].map(_durations(r))
     off = (~k["t_s"].between(0, dur + 1)).sum()
-    out.append(_c("kills.inside_round", "error", off == 0, f"{off} kills outside [0, duration]"))
+    out.append(_c("kills.inside_round", "error", off == 0, f"{off} live kills outside [0, duration]"))
     mixed = (k["attacker_team"].isna() | k["victim_team"].isna() | (k["attacker_team"] == k["victim_team"])).sum()
     out.append(_c("kills.opposing_teams", "error", mixed == 0, f"{mixed} kills without two opposing teams"))
     # Cross-table: a killed player must show 0 health in the next position sample.
@@ -130,9 +148,57 @@ def _events_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     first_plant = plants.groupby("round_num")["t_s"].min()
     orphan = sum(1 for _, x in defuses.iterrows() if x["round_num"] not in first_plant.index or x["t_s"] < first_plant[x["round_num"]])
     out.append(_c("bomb.defuse_after_plant", "error", orphan == 0, f"{orphan} defuses without a prior plant"))
-    per_round = e.groupby("round_num").size()
-    out.append(_c("economy.two_sides_per_round", "error", set(per_round.index) == set(r["round_num"]) and (per_round == 2).all(),
-                  "economy must have exactly one CT and one T row per round"))
+    out.append(_c("economy.available", "warning", not e.empty, "no economy rows: buy-type insights will be missing"))
+    if not e.empty:  # absent is a warning above; present but inconsistent is an error
+        per_round = e.groupby("round_num").size()
+        out.append(_c("economy.two_sides_per_round", "error",
+                      set(per_round.index) == set(r["round_num"]) and (per_round == 2).all(),
+                      "economy must have exactly one CT and one T row per round"))
+    return out
+
+
+def _utility_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
+    """Flashes, grenades, shots and item events: tables promoted to Silver after the core ones."""
+    b, g, sh, ie, r = t["blinds"], t["grenades"], t["shots"], t["item_events"], t["rounds"]
+    out: list[Check] = []
+    rounds = set(r["round_num"])
+    for name, df, col in (("blinds", b, "round_num"), ("grenades", g, "round_num"),
+                          ("shots", sh, "round_num"), ("item_events", ie, "round_num")):
+        stray = (~df[col].isin(rounds)).sum() if not df.empty else 0
+        out.append(_c(f"{name}.inside_known_rounds", "error", stray == 0,
+                      f"{stray} rows on rounds that are not in the rounds table"))
+    if not b.empty:
+        # A flash lasts at most ~5 s in CS2; anything longer means the duration is not seconds.
+        bad = (~b["duration"].between(0, 6, inclusive="right")).sum()
+        out.append(_c("blinds.duration_plausible", "error", bad == 0, f"{bad} flashes outside (0, 6] s"))
+        out.append(_c("blinds.self_and_team_exclusive", "error",
+                      not (b["is_self_flash"] & b["is_team_flash"]).any(),
+                      "a flash cannot be both a self-flash and a team-flash"))
+    if not g.empty:
+        out.append(_c("grenades.one_row_per_throw", "error",
+                      not g.duplicated(["round_num", "thrower_steamid", "start_tick"]).any(),
+                      "the same throw appears more than once"))
+        out.append(_c("grenades.flight_forwards", "error", (g["end_tick"] >= g["start_tick"]).all(),
+                      "a grenade that lands before it is thrown"))
+        known = {"he", "smoke", "flashbang", "molotov", "incendiary", "decoy"}
+        odd = sorted(set(g["grenade_type"].dropna()) - known)
+        out.append(_c("grenades.known_types", "warning", not odd, f"unknown grenade types: {odd}"))
+    if not sh.empty:
+        out.append(_c("shots.weapon_prefix_stripped", "error",
+                      not sh["weapon"].astype("string").str.startswith("weapon_").any(),
+                      "weapon names still carry the shots table's weapon_ prefix"))
+        # Every shot needs a shooter on a known team, or per-player accuracy would silently drift.
+        unknown = sh["team"].isna().sum()
+        out.append(_c("shots.shooter_known", "error", unknown == 0, f"{unknown} shots without a team"))
+    if not ie.empty:
+        out.append(_c("item_events.known_actions", "error",
+                      set(ie["action"].dropna()) <= {"purchase", "pickup", "drop"},
+                      f"unexpected actions: {sorted(set(ie['action'].dropna()) - {'purchase', 'pickup', 'drop'})}"))
+        out.append(_c("item_events.freeze_flag_matches_clock", "error",
+                      (ie["is_freeze_time"] == (ie["t_s"] < 0)).all(),
+                      "is_freeze_time disagrees with t_s"))
+        out.append(_c("item_events.costs_not_negative", "error", (ie["cost"] >= 0).all(),
+                      "a negative item cost"))
     return out
 
 
@@ -142,7 +208,7 @@ def check_match(tables: dict[str, pd.DataFrame]) -> list[Check]:
     if missing:
         return [_c("silver.tables_present", "error", False, f"missing tables: {missing}")]
     out: list[Check] = []
-    for section in (_rounds_checks, _kills_checks, _positions_checks, _events_checks):
+    for section in (_rounds_checks, _kills_checks, _positions_checks, _events_checks, _utility_checks):
         try:
             out += section(tables)
         except Exception as exc:  # noqa: BLE001 - a checker must report bad data, never crash on it

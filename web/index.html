@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CS2 Round Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0e13; --panel:#121720; --panel-2:#171d28; --line:#232b38;
+    --ink:#e6eaf2; --ink-2:#9aa6ba; --ink-3:#64718a;
+    --ct:#5aa9e6; --t:#e8b04b; --acc:#7ee0c0; --warn:#ef7a7a;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:400 14px/1.5 Inter,system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  #app{display:grid;grid-template-columns:286px minmax(0,1fr) 300px;height:100vh;overflow:hidden}
+  @media (max-width:1100px){#app{grid-template-columns:1fr;height:auto;overflow:visible}}
+
+  .col{min-width:0;display:flex;flex-direction:column;overflow:hidden}
+  .col.left{border-right:1px solid var(--line);background:var(--panel)}
+  .col.right{border-left:1px solid var(--line);background:var(--panel)}
+  .pad{padding:14px 16px}
+  .scroll{overflow-y:auto;overflow-x:hidden;flex:1;min-height:0}
+  .scroll::-webkit-scrollbar{width:9px}
+  .scroll::-webkit-scrollbar-thumb{background:#2a3444;border-radius:9px}
+
+  h1{margin:0;font-size:14px;font-weight:600;letter-spacing:.2px}
+  .sub{color:var(--ink-3);font-size:11px;margin-top:3px}
+  .hd{border-bottom:1px solid var(--line)}
+  .lbl{font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:0 0 7px}
+
+  .field{margin-bottom:13px}
+  select,button,input{font-family:inherit;font-size:13px;color:var(--ink)}
+  select{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);border-radius:7px;
+    padding:7px 9px;appearance:none;cursor:pointer;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none' stroke='%239aa6ba' stroke-width='1.5'><path d='M1 1l4 4 4-4'/></svg>");
+    background-repeat:no-repeat;background-position:right 10px center;padding-right:26px;
+  }
+  select:focus,button:focus{outline:2px solid #2f4f6e;outline-offset:1px}
+
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{
+    background:var(--panel-2);border:1px solid var(--line);border-radius:999px;
+    padding:4px 10px;font-size:12px;color:var(--ink-2);cursor:pointer;
+  }
+  .chip[aria-pressed="true"]{background:#1d3348;border-color:#2f5675;color:#cfe6fb}
+
+  .count{font-variant-numeric:tabular-nums;color:var(--ink-2);font-size:12px}
+  .rounds{display:flex;flex-direction:column;gap:3px;padding:0 10px 14px}
+  .round{
+    display:grid;grid-template-columns:30px 1fr auto;gap:9px;align-items:center;
+    background:transparent;border:1px solid transparent;border-radius:8px;
+    padding:7px 9px;cursor:pointer;text-align:left;width:100%;
+  }
+  .round:hover{background:var(--panel-2)}
+  .round[aria-current="true"]{background:#16263a;border-color:#2c4a68}
+  .round .n{font:500 12px/1 var(--mono);color:var(--ink-3);text-align:right}
+  .round .who{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .round .tag{font:400 10px/1 var(--mono);color:var(--ink-3);letter-spacing:.03em}
+  .win{color:var(--acc)} .lose{color:var(--warn)}
+
+  .stagewrap{flex:1;min-height:0;display:flex;flex-direction:column;background:#0a0d12}
+  .stage{flex:1;min-height:0;position:relative;display:grid;place-items:center;padding:14px}
+  canvas{max-width:100%;max-height:100%;border-radius:10px;background:#0e131a;touch-action:none}
+  .empty{color:var(--ink-3);font-size:13px;text-align:center;max-width:280px;line-height:1.6}
+
+  .bar{border-top:1px solid var(--line);background:var(--panel);padding:10px 14px}
+  .row{display:flex;align-items:center;gap:10px}
+  .btn{
+    background:var(--panel-2);border:1px solid var(--line);border-radius:7px;
+    padding:6px 12px;cursor:pointer;font-size:13px;white-space:nowrap;
+  }
+  .btn:hover{background:#1d2532}
+  .btn.primary{background:#1d3348;border-color:#2f5675;color:#cfe6fb;min-width:70px}
+  .clock{font:500 13px/1 var(--mono);color:var(--ink-2);min-width:66px;font-variant-numeric:tabular-nums}
+  .track{position:relative;flex:1;height:26px;display:flex;align-items:center}
+  .track input{width:100%;margin:0;accent-color:#5aa9e6;cursor:pointer}
+  .marks{position:absolute;left:0;right:0;top:2px;height:7px;pointer-events:none}
+  .mark{position:absolute;width:2px;height:7px;border-radius:1px;transform:translateX(-1px)}
+
+  .kills{display:flex;flex-direction:column;gap:2px;padding:0 10px 14px}
+  .kill{
+    display:grid;grid-template-columns:40px 1fr;gap:8px;align-items:baseline;
+    background:none;border:0;border-radius:6px;padding:5px 8px;cursor:pointer;text-align:left;width:100%;color:inherit;
+  }
+  .kill:hover{background:var(--panel-2)}
+  .kill .t{font:400 11px/1.4 var(--mono);color:var(--ink-3)}
+  .kill .txt{font-size:12.5px;line-height:1.4}
+  .kill .w{color:var(--ink-3);font-size:11px}
+  .nm{font-weight:500}
+  .nm.ct{color:var(--ct)} .nm.t{color:var(--t)}
+  .first{color:var(--acc);font-size:10px;font-weight:600;letter-spacing:.05em}
+  .post{color:var(--ink-3);font-size:10px;letter-spacing:.05em}
+
+  .facts{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:12.5px}
+  .facts dt{color:var(--ink-3)} .facts dd{margin:0;font-variant-numeric:tabular-nums}
+  .note{color:var(--ink-3);font-size:11px;line-height:1.55;border-top:1px solid var(--line);padding-top:11px;margin-top:3px}
+  .err{color:var(--warn);font-size:12.5px;line-height:1.6}
+  .legend{display:flex;gap:12px;font-size:11px;color:var(--ink-3);align-items:center;flex-wrap:wrap}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:-1px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="col left">
+    <div class="pad hd">
+      <h1>CS2 Round Explorer</h1>
+      <div class="sub" id="src">loading…</div>
+    </div>
+    <div class="pad" style="padding-bottom:4px">
+      <div class="field">
+        <p class="lbl">Match</p>
+        <select id="f-match"></select>
+      </div>
+      <div class="field">
+        <p class="lbl">Opening duel won by</p>
+        <select id="f-fbteam"></select>
+      </div>
+      <div class="field">
+        <p class="lbl">Opening duel zone</p>
+        <select id="f-zone"></select>
+      </div>
+      <div class="field">
+        <p class="lbl">Round</p>
+        <div class="chips" id="f-flags"></div>
+      </div>
+    </div>
+    <div class="pad" style="padding-top:6px;padding-bottom:6px;border-top:1px solid var(--line)">
+      <span class="count" id="count"></span>
+    </div>
+    <div class="scroll"><div class="rounds" id="round-list"></div></div>
+  </div>
+
+  <div class="col stagewrap">
+    <div class="stage" id="stage">
+      <p class="empty" id="stage-msg">Pick a round on the left to replay it.</p>
+      <canvas id="map" width="760" height="760" hidden></canvas>
+    </div>
+    <div class="bar">
+      <div class="row">
+        <button class="btn primary" id="play">Play</button>
+        <span class="clock" id="clock">0.0 s</span>
+        <div class="track">
+          <div class="marks" id="marks"></div>
+          <input id="seek" type="range" min="0" max="100" step="0.1" value="0" aria-label="Round time">
+        </div>
+        <select id="speed" style="width:auto">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </div>
+      <div class="row legend" style="margin-top:9px">
+        <span><i class="dot" style="background:var(--ct)"></i>CT</span>
+        <span><i class="dot" style="background:var(--t)"></i>T</span>
+        <span><i class="dot" style="background:#6b7a90"></i>dead</span>
+        <span><i class="dot" style="background:var(--acc)"></i>opening kill</span>
+        <span id="zone-hint"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="col right">
+    <div class="pad hd"><p class="lbl" style="margin:0">Round</p><div class="sub" id="round-title">—</div></div>
+    <div class="scroll">
+      <div class="pad"><dl class="facts" id="facts"></dl></div>
+      <div class="pad" style="padding-top:0"><p class="lbl">Kills</p></div>
+      <div class="kills" id="kill-list"></div>
+      <div class="pad"><p class="note" id="note"></p></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = (new URLSearchParams(location.search).get('data') || '.').replace(/\/$/, '');
+const $ = (id) => document.getElementById(id);
+const SIDE_COLOUR = { CT: '#5aa9e6', T: '#e8b04b' };
+
+const state = {
+  index: null, maps: {}, matchId: null, round: null, payload: null,
+  t: 0, playing: false, speed: 1, last: 0, duration: 0, selectedKill: null,
+  filters: { match: 'all', fbTeam: 'all', zone: 'all', flags: new Set() },
+};
+
+const FLAGS = [
+  ['fb_won', 'Opening duel converted'],
+  ['planted', 'Bomb planted'],
+  ['half1', 'First half'],
+  ['half2', 'Second half'],
+  ['pistol', 'Pistol round'],
+];
+
+async function getJSON(path) {
+  const res = await fetch(`${BASE}/${path}`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  return res.json();
+}
+
+function fmt(v, digits = 1) {
+  return v === null || v === undefined || Number.isNaN(v) ? '—' : Number(v).toFixed(digits);
+}
+
+function rowsFor(match) {
+  return match.rounds.map((r) => ({ ...r, match_id: match.match_id, map_name: match.map_name }));
+}
+
+function allRows() {
+  if (!state.index) return [];
+  const ms = state.filters.match === 'all'
+    ? state.index.matches
+    : state.index.matches.filter((m) => m.match_id === state.filters.match);
+  return ms.flatMap(rowsFor);
+}
+
+function passes(r) {
+  const f = state.filters;
+  if (f.fbTeam !== 'all' && r.fb_team !== f.fbTeam) return false;
+  if (f.zone !== 'all' && r.fb_zone !== f.zone) return false;
+  for (const flag of f.flags) {
+    if (flag === 'fb_won' && r.fb_won !== true) return false;
+    if (flag === 'planted' && r.planted !== true) return false;
+    if (flag === 'half1' && r.half !== 1) return false;
+    if (flag === 'half2' && r.half !== 2) return false;
+    if (flag === 'pistol' && !(r.round_num === 1 || r.round_num === 13)) return false;
+  }
+  return true;
+}
+
+function option(value, label) {
+  const o = document.createElement('option');
+  o.value = value; o.textContent = label;
+  return o;
+}
+
+function buildFilters() {
+  const idx = state.index;
+  const sel = $('f-match');
+  sel.replaceChildren(option('all', `All matches (${idx.matches.length})`));
+  for (const m of idx.matches) {
+    const label = `${m.map_name.replace(/^de_/, '')} — ${m.team_a} ${m.score_a}:${m.score_b} ${m.team_b}`;
+    sel.append(option(m.match_id, label));
+  }
+  sel.onchange = () => { state.filters.match = sel.value; refreshOptions(); renderRounds(); };
+
+  const flags = $('f-flags');
+  flags.replaceChildren();
+  for (const [key, label] of FLAGS) {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.type = 'button'; b.textContent = label;
+    b.setAttribute('aria-pressed', 'false');
+    b.onclick = () => {
+      const on = b.getAttribute('aria-pressed') === 'true';
+      b.setAttribute('aria-pressed', String(!on));
+      if (on) state.filters.flags.delete(key); else state.filters.flags.add(key);
+      renderRounds();
+    };
+    flags.append(b);
+  }
+  refreshOptions();
+}
+
+function refreshOptions() {
+  const rows = allRows();
+  const fill = (el, key, allLabel, onchange) => {
+    const values = [...new Set(rows.map((r) => r[key]).filter((v) => v !== null && v !== undefined))].sort();
+    const keep = el.value;
+    el.replaceChildren(option('all', allLabel));
+    values.forEach((v) => el.append(option(v, v)));
+    el.value = values.includes(keep) ? keep : 'all';
+    state.filters[onchange] = el.value;
+    el.onchange = () => { state.filters[onchange] = el.value; renderRounds(); };
+  };
+  fill($('f-fbteam'), 'fb_team', 'Either team', 'fbTeam');
+  fill($('f-zone'), 'fb_zone', 'Anywhere', 'zone');
+}
+
+function renderRounds() {
+  const rows = allRows().filter(passes);
+  $('count').textContent = `${rows.length} round${rows.length === 1 ? '' : 's'} match the filter`;
+  const list = $('round-list');
+  list.replaceChildren();
+  if (!rows.length) {
+    const p = document.createElement('p');
+    p.className = 'empty'; p.style.padding = '14px 6px';
+    p.textContent = 'No round matches these filters.';
+    list.append(p);
+    return;
+  }
+  for (const r of rows) {
+    const b = document.createElement('button');
+    b.className = 'round'; b.type = 'button';
+    b.setAttribute('aria-current', String(state.matchId === r.match_id && state.round === r.round_num));
+    const won = r.fb_won === true;
+    b.innerHTML = `<span class="n">${r.round_num}</span>
+      <span class="who"><span class="nm">${r.fb_player ?? '—'}</span>
+        <span class="tag">${r.fb_zone ?? ''}</span></span>
+      <span class="tag ${won ? 'win' : 'lose'}">${r.fb_team ? (won ? 'held' : 'lost') : ''}</span>`;
+    b.onclick = () => loadRound(r.match_id, r.round_num);
+    list.append(b);
+  }
+}
+
+async function loadRound(matchId, roundNum) {
+  stop();
+  state.matchId = matchId; state.round = roundNum; state.selectedKill = null;
+  const match = state.index.matches.find((m) => m.match_id === matchId);
+  if (!state.maps[match.map_name]) {
+    state.maps[match.map_name] = await getJSON(`maps/${match.map_name}.json`);
+  }
+  $('stage-msg').textContent = 'Loading round…';
+  try {
+    state.payload = await getJSON(`${matchId}/r${roundNum}.json`);
+  } catch (err) {
+    $('stage-msg').textContent = `Could not load that round (${err.message}).`;
+    return;
+  }
+  const times = state.payload.players.flatMap((p) => p.track.map((s) => s[0]));
+  const row = match.rounds.find((r) => r.round_num === roundNum);
+  state.duration = Math.max(row?.duration_s ?? 0, times.length ? Math.max(...times) : 0, 1);
+  state.t = 0;
+  $('map').hidden = false; $('stage-msg').hidden = true;
+  $('seek').max = String(state.duration);
+  renderRounds(); renderDetail(row, match); renderMarks(); draw();
+}
+
+function renderDetail(row, match) {
+  $('round-title').textContent =
+    `${match.map_name.replace(/^de_/, '')} · round ${row.round_num} · ${match.event ?? ''}`.trim();
+  const dl = $('facts');
+  const pairs = [
+    ['Winner', `${row.winner_team ?? '—'} (${row.winner ?? '—'})`],
+    ['How', (row.reason ?? '—').replace(/_/g, ' ')],
+    ['Length', `${fmt(row.duration_s)} s`],
+    ['Opening duel', row.fb_player ? `${row.fb_player} → ${row.fb_victim}` : 'no kills'],
+    ['Where', row.fb_zone ?? '—'],
+    ['At', row.fb_t_s === null ? '—' : `${fmt(row.fb_t_s)} s`],
+    ['Converted', row.fb_won === null ? '—' : (row.fb_won ? 'yes' : 'no')],
+    ['Bomb', row.planted ? `${row.bomb_site} at ${fmt(row.plant_t_s)} s` : 'not planted'],
+    ['Buys', `CT ${row.ct_buy ?? '—'} · T ${row.t_buy ?? '—'}`],
+    ['Sides', `CT ${row.ct_team} · T ${row.t_team}`],
+  ];
+  dl.replaceChildren();
+  for (const [k, v] of pairs) {
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    dl.append(dt, dd);
+  }
+
+  const kl = $('kill-list');
+  kl.replaceChildren();
+  for (const [i, k] of state.payload.kills.entries()) {
+    const b = document.createElement('button');
+    b.className = 'kill'; b.type = 'button';
+    const a = `<span class="nm ${k.attacker_side === 'CT' ? 'ct' : 't'}">${k.attacker_name}</span>`;
+    const v = `<span class="nm ${k.victim_side === 'CT' ? 'ct' : 't'}">${k.victim_name}</span>`;
+    const badge = k.is_first_kill ? '<span class="first">OPENING</span>'
+      : (k.is_post_round ? '<span class="post">POST-ROUND</span>' : '');
+    b.innerHTML = `<span class="t">${fmt(k.t_s)}s</span>
+      <span class="txt">${a} → ${v} ${badge}<br><span class="w">${k.weapon}${k.headshot ? ' · hs' : ''}</span></span>`;
+    b.onclick = () => { state.selectedKill = i; seek(k.t_s); };
+    kl.append(b);
+  }
+  const mp = state.maps[match.map_name];
+  $('note').textContent = mp?.note ?? '';
+  $('zone-hint').textContent = `${match.map_name.replace(/^de_/, '')} · outline and zones derived from the demos`;
+}
+
+function renderMarks() {
+  const box = $('marks');
+  box.replaceChildren();
+  for (const k of state.payload.kills) {
+    if (k.t_s < 0 || k.t_s > state.duration) continue;
+    const m = document.createElement('i');
+    m.className = 'mark';
+    m.style.left = `${(k.t_s / state.duration) * 100}%`;
+    m.style.background = k.is_first_kill ? 'var(--acc)' : (k.attacker_side === 'CT' ? 'var(--ct)' : 'var(--t)');
+    box.append(m);
+  }
+}
+
+function at(track, t) {
+  let out = null;
+  for (const s of track) { if (s[0] <= t) out = s; else break; }
+  return out;
+}
+
+function draw() {
+  const cv = $('map'), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  if (!state.payload) return;
+  const match = state.index.matches.find((m) => m.match_id === state.matchId);
+  const mp = state.maps[match.map_name];
+  const P = (nx, ny) => [nx * W, H - ny * H];
+
+  // Walkable area, derived from where players have been.
+  const grid = mp.occupancy ?? [];
+  if (grid.length) {
+    const n = grid.length, cw = W / n, ch = H / n;
+    g.fillStyle = '#19212c';
+    for (let j = 0; j < n; j++) {
+      const row = grid[j];
+      for (let i = 0; i < row.length; i++) {
+        if (row[i] === '1') g.fillRect(i * cw, H - (j + 1) * ch, cw + 0.6, ch + 0.6);
+      }
+    }
+  }
+
+  g.font = '500 11px Inter, sans-serif';
+  g.textAlign = 'center';
+  for (const z of mp.zones ?? []) {
+    const [x, y] = P(z.x, z.y);
+    g.fillStyle = 'rgba(126,224,192,.14)';
+    g.beginPath(); g.arc(x, y, 5, 0, 7); g.fill();
+    g.fillStyle = '#4c5a70';
+    g.fillText(z.zone, x, y - 10);
+  }
+
+  const t = state.t;
+  for (const s of state.payload.smokes ?? []) {
+    if (s.t_start_s <= t && t <= s.t_end_s && s.nx !== null) {
+      const [x, y] = P(s.nx, s.ny);
+      g.fillStyle = 'rgba(190,200,215,.14)';
+      g.beginPath(); g.arc(x, y, 26, 0, 7); g.fill();
+    }
+  }
+  for (const n of state.payload.grenades ?? []) {
+    if (n.grenade_type === 'molotov' && n.t_start_s <= t && t <= n.t_end_s && n.nx !== null) {
+      const [x, y] = P(n.nx, n.ny);
+      g.fillStyle = 'rgba(239,122,122,.16)';
+      g.beginPath(); g.arc(x, y, 18, 0, 7); g.fill();
+    }
+  }
+
+  for (const b of state.payload.bomb ?? []) {
+    if (b.event === 'finish_plant' && b.t_s <= t && b.nx !== null) {
+      const [x, y] = P(b.nx, b.ny);
+      g.fillStyle = '#ef7a7a';
+      g.beginPath(); g.moveTo(x, y - 7); g.lineTo(x + 6, y + 5); g.lineTo(x - 6, y + 5); g.closePath(); g.fill();
+    }
+  }
+
+  // Kills already shown: a cross where the victim fell.
+  for (const [i, k] of state.payload.kills.entries()) {
+    if (k.t_s > t || k.victim_nx === null) continue;
+    const [x, y] = P(k.victim_nx, k.victim_ny);
+    const live = t - k.t_s < 3 || state.selectedKill === i;
+    g.strokeStyle = k.is_first_kill ? '#7ee0c0' : '#8794a8';
+    g.lineWidth = live ? 2.2 : 1.2;
+    g.globalAlpha = live ? 1 : 0.5;
+    const r = live ? 6 : 4;
+    g.beginPath();
+    g.moveTo(x - r, y - r); g.lineTo(x + r, y + r);
+    g.moveTo(x + r, y - r); g.lineTo(x - r, y + r);
+    g.stroke();
+    g.globalAlpha = 1;
+  }
+
+  for (const p of state.payload.players) {
+    const s = at(p.track, t);
+    if (!s || s[1] === null) continue;
+    const [x, y] = P(s[1], s[2]);
+    const alive = s[3] > 0;
+    g.fillStyle = alive ? (SIDE_COLOUR[p.side] ?? '#9aa6ba') : '#6b7a90';
+    g.globalAlpha = alive ? 1 : 0.4;
+    g.beginPath(); g.arc(x, y, alive ? 6 : 4, 0, 7); g.fill();
+    if (alive) {
+      g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = 1; g.stroke();
+      g.fillStyle = '#c9d4e4';
+      g.font = '500 10px Inter, sans-serif';
+      g.fillText(p.name, x, y - 11);
+    }
+    g.globalAlpha = 1;
+  }
+  $('clock').textContent = `${fmt(t)} s`;
+  $('seek').value = String(t);
+}
+
+function seek(t) {
+  state.t = Math.max(0, Math.min(state.duration, t));
+  draw();
+}
+
+function stop() {
+  state.playing = false;
+  $('play').textContent = 'Play';
+}
+
+function tick(now) {
+  if (!state.playing) return;
+  const dt = (now - state.last) / 1000;
+  state.last = now;
+  state.t += dt * state.speed;
+  if (state.t >= state.duration) { state.t = state.duration; stop(); }
+  draw();
+  if (state.playing) requestAnimationFrame(tick);
+}
+
+$('play').onclick = () => {
+  if (!state.payload) return;
+  if (state.playing) { stop(); return; }
+  if (state.t >= state.duration) state.t = 0;
+  state.playing = true; state.last = performance.now();
+  $('play').textContent = 'Pause';
+  requestAnimationFrame(tick);
+};
+$('seek').oninput = (e) => { stop(); seek(Number(e.target.value)); };
+$('speed').onchange = (e) => { state.speed = Number(e.target.value); };
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === ' ') { e.preventDefault(); $('play').click(); }
+  if (e.key === 'ArrowRight') seek(state.t + 1);
+  if (e.key === 'ArrowLeft') seek(state.t - 1);
+});
+
+(async () => {
+  try {
+    state.index = await getJSON('index.json');
+  } catch (err) {
+    $('src').textContent = 'no data';
+    $('stage-msg').innerHTML = `<span class="err">Could not load <code>index.json</code> from
+      <code>${BASE}/</code> (${err.message}).<br><br>Run <code>python run_pipeline.py --serve-only</code>
+      and serve <code>data/serving/</code> next to this page.</span>`;
+    return;
+  }
+  const n = state.index.matches.length;
+  const rounds = state.index.matches.reduce((a, m) => a + m.n_rounds, 0);
+  const skipped = Object.keys(state.index.skipped ?? {}).length;
+  $('src').textContent = `${n} match${n === 1 ? '' : 'es'} · ${rounds} rounds · ${state.index.sample_hz ?? '?'} Hz`
+    + (skipped ? ` · ${skipped} excluded` : '');
+  buildFilters();
+  renderRounds();
+  const first = allRows().filter(passes)[0];
+  if (first) loadRound(first.match_id, first.round_num);
+})();
+</script>
+</body>
+</html>

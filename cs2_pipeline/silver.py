@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .bronze import read_bronze, read_manifest
+from .catalog import entry_for
 from .config import SILVER_DIR, SILVER_SCHEMAS, SILVER_TABLES, SILVER_VERSION, get_logger
 from .utils import coerce_schema, missing_columns
 
@@ -97,24 +98,41 @@ def normalize_side(s: pd.Series) -> pd.Series:
     return s.astype("string").str.strip().str.lower().map(_SIDE_MAP).astype("string")
 
 
-def assign_round(df: pd.DataFrame, rounds: pd.DataFrame, tick_col: str = "tick") -> pd.DataFrame:
+def assign_round(df: pd.DataFrame, rounds: pd.DataFrame, tick_col: str = "tick",
+                 *, include_post_round: bool = False) -> pd.DataFrame:
     """Attach ``round_num`` to events by tick range; drop events outside any round.
 
     ``rounds`` must hold only the rounds that are kept (no knife rounds). Events that
-    happen in warm-up or between rounds fall outside every [start_tick, end_tick] and
-    are dropped. That includes post-round events: once the round is decided (``end_tick``),
-    a kill before ``official_end_tick`` no longer counts toward its outcome.
+    happen in warm-up or between rounds fall outside every round window and are dropped.
+
+    A round is decided at ``end_tick`` but only closes at ``official_end_tick``, and players
+    keep shooting in between. Those post-round events say nothing about how the round was
+    won, so by default the window ends at ``end_tick`` and they are dropped. With
+    ``include_post_round`` the window runs to ``official_end_tick`` and an ``is_post_round``
+    flag marks them, which is what lets player totals be reconciled with the public record
+    while every round-outcome metric still ignores them.
     """
+    cols = ["round_num", "start_tick", "end_tick"]
+    if include_post_round:
+        cols.append("official_end_tick")
     if df.empty:
-        return df.assign(round_num=pd.Series(dtype="int64"))
+        out = df.assign(round_num=pd.Series(dtype="int64"))
+        return out.assign(is_post_round=pd.Series(dtype="bool")) if include_post_round else out
     left = df.copy()
     left["_tick"] = left[tick_col].astype("int64")
     left = left.sort_values("_tick", kind="stable")
-    right = (rounds[["round_num", "start_tick", "end_tick"]]
-             .rename(columns={"start_tick": "_start", "end_tick": "_end"})
+    right = (rounds[cols].rename(columns={"start_tick": "_start", "end_tick": "_end",
+                                          "official_end_tick": "_official"})
              .astype("int64").sort_values("_start"))
     merged = pd.merge_asof(left, right, left_on="_tick", right_on="_start", direction="backward")
-    merged = merged[merged["_tick"] <= merged["_end"]]
+    if include_post_round:
+        # official_end_tick can be missing or stale; never let it shrink the live window.
+        merged["_official"] = merged[["_official", "_end"]].max(axis=1)
+        merged = merged[merged["_tick"] <= merged["_official"]]
+        merged["is_post_round"] = merged["_tick"] > merged["_end"]
+        merged = merged.drop(columns=["_official"])
+    else:
+        merged = merged[merged["_tick"] <= merged["_end"]]
     return merged.drop(columns=["_tick", "_start", "_end"]).reset_index(drop=True)
 
 
@@ -142,8 +160,47 @@ def _finish(df: pd.DataFrame, table: str, match_id: str) -> pd.DataFrame:
 
 # --- table builders -----------------------------------------------------------
 
-def clean_players(raw: pd.DataFrame, match_id: str) -> pd.DataFrame:
-    df = raw[raw["steamid"].astype("string") != _PSEUDO_PLAYER].dropna(subset=["team_clan_name"])
+def infer_start_sides(snap: pd.DataFrame, base: pd.DataFrame) -> dict[str, str]:
+    """Side (CT/T) each player started the first valid round on, from the snapshots."""
+    if snap.empty or base.empty:
+        return {}
+    first = base.iloc[0]
+    df = snap[(snap["tick"] >= first["start_tick"]) & (snap["tick"] <= first["end_tick"])].copy()
+    df["side"] = normalize_side(df["side"])
+    df = df[df["side"].isin(["CT", "T"])].sort_values("tick")
+    df["steamid"] = df["steamid"].astype("string")
+    return df.drop_duplicates("steamid").set_index("steamid")["side"].to_dict()
+
+
+def _fill_team_names(df: pd.DataFrame, start_side: dict[str, str]) -> pd.DataFrame:
+    """Name players without a clan name from who they started the match with.
+
+    Players that start on the same side are one team, so a missing name takes
+    the team name its side-mates carry. With no names at all, the two halves
+    become 'Team A' (started CT) and 'Team B' (started T). A side holding more
+    than 5 players is not a team, so nothing is inferred for it.
+    """
+    df = df.copy()
+    df["_start"] = df["steamid"].astype("string").map(start_side)
+    fallback = {"CT": "Team A", "T": "Team B"}
+    for side, grp in df.dropna(subset=["_start"]).groupby("_start"):
+        if len(grp) > 5:
+            continue
+        known = grp["team_clan_name"].dropna()
+        name = known.mode().iat[0] if len(known) else fallback[side]
+        idx = grp.index[grp["team_clan_name"].isna()]
+        df.loc[idx, "team_clan_name"] = name
+    return df.drop(columns="_start")
+
+
+def clean_players(raw: pd.DataFrame, match_id: str,
+                  start_side: dict[str, str] | None = None) -> pd.DataFrame:
+    df = raw[raw["steamid"].astype("string") != _PSEUDO_PLAYER].copy()
+    # A blank clan name is a missing one: otherwise "" would be treated as a team.
+    df["team_clan_name"] = df["team_clan_name"].astype("string").str.strip().replace("", pd.NA)
+    if start_side:
+        df = _fill_team_names(df, start_side)
+    df = df.dropna(subset=["team_clan_name"])
     df = df.rename(columns={"team_clan_name": "team"})
     return _finish(df.drop_duplicates("steamid"), "players", match_id)
 
@@ -154,8 +211,19 @@ def clean_rounds_base(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.drop(columns=["reason"], errors="ignore").rename(
         columns={"freeze_end_tick": "freeze_end", "reason_name": "reason"})
     df["winner"] = normalize_side(df["winner_side"])
-    keep = (~df["is_knife_round"].fillna(False)) & (df["start_tick"] > 0) & df["winner"].isin(["CT", "T"])
-    return df[keep].sort_values("round_num").reset_index(drop=True)
+    # A playable round needs a freeze phase inside it and a live phase after it. Tick 0 is a
+    # legitimate start: when the recording begins at the first round, that round starts there.
+    playable = ((df["start_tick"] >= 0) & (df["start_tick"] <= df["freeze_end"])
+                & (df["freeze_end"] < df["end_tick"]))
+    keep = (~df["is_knife_round"].fillna(False)) & playable & df["winner"].isin(["CT", "T"])
+    df = df[keep].sort_values("start_tick")
+    # A restart (mp_restartgame, a replayed round) leaves two rows for the same round
+    # number. The last one is the round that was actually played out.
+    dup = df["round_num"].duplicated(keep="last")
+    if dup.any():
+        log.warning("silver.rounds: dropped %d superseded round(s) %s (restarted rounds)",
+                    int(dup.sum()), sorted(df.loc[dup, "round_num"].tolist()))
+    return df[~dup].sort_values("round_num").reset_index(drop=True)
 
 
 def clean_positions(snap: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
@@ -197,7 +265,7 @@ def clean_rounds(base: pd.DataFrame, positions: pd.DataFrame, bomb: pd.DataFrame
 
 def clean_kills(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
                 tick_rate: float, match_id: str) -> pd.DataFrame:
-    df = assign_round(raw, rounds)
+    df = assign_round(raw, rounds, include_post_round=True)
     df = add_clock(df, rounds, tick_rate)
     df = df[df["t_s"] >= 0]
     for side in ("attacker_side", "victim_side"):
@@ -209,14 +277,18 @@ def clean_kills(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str]
     df = df[(df["weapon"].astype("string").str.lower() != "world")
             & (df["attacker_team"] != df["victim_team"])]
     df = df.sort_values(["round_num", "tick"], kind="stable")
-    df["kill_order"] = df.groupby("round_num").cumcount() + 1
-    df["is_first_kill"] = df["kill_order"] == 1
+    # Ordering covers the live phase only: a kill after the round was decided is never the
+    # opening duel and must not shift the order of the kills that decided it.
+    live = ~df["is_post_round"]
+    df["kill_order"] = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    df.loc[live, "kill_order"] = df[live].groupby("round_num").cumcount() + 1
+    df["is_first_kill"] = (df["kill_order"] == 1).fillna(False)
     return _finish(df, "kills", match_id)
 
 
 def clean_damages(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
                   tick_rate: float, match_id: str) -> pd.DataFrame:
-    df = assign_round(raw, rounds)
+    df = assign_round(raw, rounds, include_post_round=True)
     df = add_clock(df, rounds, tick_rate)
     df = df[df["t_s"] >= 0]
     for side in ("attacker_side", "victim_side"):
@@ -247,6 +319,91 @@ def clean_smokes(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str
     return _finish(df, "smokes", match_id)
 
 
+def clean_blinds(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                 tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per flash: who blinded whom, and for how long."""
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df = df[df["t_s"] >= 0]
+    for side in ("attacker_side", "victim_side"):
+        df[side] = normalize_side(df[side])
+    df["attacker_team"] = _team(df["attacker_steamid"], team_of)
+    df["victim_team"] = _team(df["victim_steamid"], team_of)
+    df = df.dropna(subset=["attacker_steamid", "victim_steamid", "attacker_team", "victim_team"])
+    # Flashing yourself and flashing a team-mate are different mistakes, and neither is an
+    # enemy flash, so both are marked rather than dropped.
+    df["is_self_flash"] = df["attacker_steamid"] == df["victim_steamid"]
+    df["is_team_flash"] = (df["attacker_team"] == df["victim_team"]) & ~df["is_self_flash"]
+    return _finish(df.sort_values("tick", kind="stable"), "blinds", match_id)
+
+
+def clean_grenades(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                   tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per grenade THROWN, not per trajectory sample.
+
+    Bronze stores the flight path, one row per tick, which is ~70k rows a match and belongs
+    to the replay rather than to analysis. Silver keeps the throw: who threw what, when it
+    left the hand and where it ended up.
+    """
+    if raw.empty:
+        return _finish(raw.assign(round_num=pd.Series(dtype="int64")), "grenades", match_id)
+    df = raw.sort_values("tick", kind="stable")
+    key = ["entity_id", "entity_serial", "start_tick"]
+    first = df.groupby(key, as_index=False).first().rename(columns={"x": "throw_x", "y": "throw_y", "z": "throw_z"})
+    last = df.groupby(key, as_index=False).last()[key + ["x", "y", "z"]].rename(
+        columns={"x": "land_x", "y": "land_y", "z": "land_z"})
+    n = df.groupby(key, as_index=False).size().rename(columns={"size": "n_samples"})
+    g = first.merge(last, on=key).merge(n, on=key).rename(columns={"type": "grenade_type"})
+
+    g = assign_round(g, rounds, tick_col="start_tick", include_post_round=True)
+    g = add_clock(g, rounds, tick_rate, tick_col="start_tick", out="t_start_s")
+    g = add_clock(g, rounds, tick_rate, tick_col="end_tick", out="t_end_s")
+    g = g[g["t_start_s"] >= 0]
+    g["thrower_side"] = normalize_side(g["thrower_side"])
+    g["thrower_team"] = _team(g["thrower_steamid"], team_of)
+    return _finish(g.sort_values("start_tick", kind="stable"), "grenades", match_id)
+
+
+#: Weapon names in the shots table carry a ``weapon_`` prefix the other tables do not use.
+_UTILITY = {"flashbang", "hegrenade", "smokegrenade", "molotov", "incgrenade", "decoy"}
+
+
+def clean_shots(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per shot fired. Grenade throws and knife swings are marked, not dropped."""
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df = df[df["t_s"] >= 0]
+    df["side"] = normalize_side(df["side"])
+    df["team"] = _team(df["steamid"], team_of)
+    df = df.dropna(subset=["steamid", "team"])
+    # Strip the prefix so the weapon joins with the kills and damages tables.
+    df["weapon"] = df["weapon"].astype("string").str.removeprefix("weapon_")
+    df["is_utility"] = df["weapon"].isin(_UTILITY)
+    df["is_knife"] = df["weapon"].str.startswith("knife", na=False)
+    return _finish(df.sort_values("tick", kind="stable"), "shots", match_id)
+
+
+def clean_item_events(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                      tick_rate: float, match_id: str) -> pd.DataFrame:
+    """Buys, pickups and drops, with what each one cost.
+
+    Unlike the other event tables this one keeps freeze time (``t_s`` below zero), because
+    that is when buying happens; ``is_freeze_time`` marks it. Freeze can be long - 20 s
+    normally, but over 200 s across a tactical pause or half-time - and in the first round it
+    also covers the warm-up when the recording starts there, so an analyst looking at what a
+    team bought for one round should expect warm-up activity inside round 1's freeze.
+    """
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df["is_freeze_time"] = df["t_s"] < 0
+    df["side"] = normalize_side(df["side"])
+    df["team"] = _team(df["steamid"], team_of)
+    df = df.dropna(subset=["steamid", "team"])
+    df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0)
+    return _finish(df.sort_values("tick", kind="stable"), "item_events", match_id)
+
+
 def clean_economy(raw: pd.DataFrame, rounds: pd.DataFrame, match_id: str) -> pd.DataFrame:
     df = raw[raw["round_num"].isin(rounds["round_num"])].copy()
     df["side"] = normalize_side(df["side"])
@@ -267,6 +424,9 @@ def build_matches(rounds: pd.DataFrame, header: pd.DataFrame, manifest: dict | N
         "tick_rate": float(h["tick_rate"]), "n_rounds": len(rounds), "team_a": a, "team_b": b,
         "score_a": int(wins.get(a, 0)), "score_b": int(wins.get(b, 0)),
         "demo_sha256": (manifest or {}).get("demo_sha256"),
+        # Event context: from data/catalog.json, else derived from the id, else null. The
+        # team names go along so an event in the file name is not mistaken for a team.
+        **entry_for(match_id, teams=[t for t in (a, b) if t]),
     }
     return _finish(pd.DataFrame([row]), "matches", match_id)
 
@@ -283,11 +443,12 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
     header = read_bronze(match_id, "header")
     tick_rate = float(header["tick_rate"].iloc[0])
 
-    players = clean_players(read_bronze(match_id, "players"), match_id)
-    team_of = dict(zip(players["steamid"], players["team"]))
-
     base = clean_rounds_base(read_bronze(match_id, "rounds"))
-    positions = clean_positions(read_bronze(match_id, "snapshots"), base, team_of, tick_rate, match_id)
+    snapshots = read_bronze(match_id, "snapshots")
+    players = clean_players(read_bronze(match_id, "players"), match_id,
+                            start_side=infer_start_sides(snapshots, base))
+    team_of = dict(zip(players["steamid"], players["team"]))
+    positions = clean_positions(snapshots, base, team_of, tick_rate, match_id)
     bomb = clean_bomb(read_bronze(match_id, "bomb"), base, team_of, tick_rate, match_id)
     rounds = clean_rounds(base, positions, bomb, tick_rate, match_id)
 
@@ -300,6 +461,10 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
         "bomb": bomb,
         "smokes": clean_smokes(read_bronze(match_id, "smokes"), rounds, team_of, tick_rate, match_id),
         "economy": clean_economy(read_bronze(match_id, "round_economy"), rounds, match_id),
+        "blinds": clean_blinds(read_bronze(match_id, "blinds"), rounds, team_of, tick_rate, match_id),
+        "grenades": clean_grenades(read_bronze(match_id, "grenades"), rounds, team_of, tick_rate, match_id),
+        "shots": clean_shots(read_bronze(match_id, "shots"), rounds, team_of, tick_rate, match_id),
+        "item_events": clean_item_events(read_bronze(match_id, "item_events"), rounds, team_of, tick_rate, match_id),
         "positions": positions,
     }
     for name, df in tables.items():
@@ -330,3 +495,23 @@ def load_silver_lake(tables: tuple[str, ...] | None = None, *,
         return pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
 
     return {t: _read_all(t) for t in (tables or SILVER_TABLES)}
+
+
+def list_matches(include_quarantined: bool = False) -> list[str]:
+    """Match ids that have Silver data, quarantined ones excluded unless asked for."""
+    skip = set() if include_quarantined else set(quarantined())
+    ids = (f.stem.removeprefix("match_") for f in (SILVER_DIR / "matches").glob("match_*.parquet"))
+    return sorted(i for i in ids if i not in skip)
+
+
+def read_match(match_id: str, tables: tuple[str, ...] | None = None,
+               columns: dict[str, list[str]] | None = None) -> dict[str, pd.DataFrame]:
+    """Read the Silver tables of ONE match (all by default).
+
+    ``columns`` narrows a table to the columns given, which matters for ``positions``: it is
+    the only table big enough (~85k rows a match) for reading all of it to be wasteful when
+    a caller needs two coordinates.
+    """
+    cols = columns or {}
+    return {t: pd.read_parquet(_silver_path(t, match_id), columns=cols.get(t))
+            for t in (tables or SILVER_TABLES)}

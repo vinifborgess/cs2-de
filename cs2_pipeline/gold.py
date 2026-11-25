@@ -9,10 +9,15 @@ Outputs (data/gold/):
 - report.md: human reading with tactical recommendation
 """
 from __future__ import annotations
-import math
 from pathlib import Path
 import pandas as pd
 from .config import GOLD_DIR, get_logger
+from .facts import build_fact_kill, build_fact_player, build_fact_round
+from .quality import check_match, summarize
+from .insights import compute_team_metrics, findings, player_leaderboard
+from .silver import list_matches, read_match
+from . import zones as zones_mod
+from .stats import wilson_ci
 
 log = get_logger()
 
@@ -59,16 +64,7 @@ def compute_round_outcomes(kills: pd.DataFrame, rounds: pd.DataFrame) -> pd.Data
     out["first_blood_won"] = out["first_blood_side"] == out["winner"]
     return out
 
-def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson confidence interval — more accurate than normal approximation
-    for proportions with small sample sizes."""
-    if n == 0:
-        return (float("nan"), float("nan"))
-    p = wins / n
-    denom = 1 + z**2 / n
-    center = (p + z**2 / (2 * n)) / denom
-    margin = (z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))) / denom
-    return (max(0.0, center - margin), min(1.0, center + margin))
+_wilson_ci = wilson_ci  # kept for backwards compatibility
 
 
 def compute_first_blood_impact(outcomes: pd.DataFrame) -> pd.DataFrame:
@@ -207,3 +203,147 @@ def run_gold(silver: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
              len(outcomes), n_matches, GOLD_DIR / "report.md")
 
     return {"outcomes": outcomes, "impact": impact, "by_weapon": by_weapon}
+
+
+#: Columns the zone fitting needs out of the positions table, which is far too big to read whole.
+_POS_FOR_ZONES = ["match_id", "round_num", "steamid", "side", "tick", "x", "y"]
+
+
+def ensure_map_zones(match_ids: list[str], *, refit: bool = False) -> dict[str, zones_mod.MapZones]:
+    """Zones for every map in these matches, fitted from all of their data and then reused.
+
+    A map is fitted once and stored; refitting is explicit, because an anchor that moves
+    between runs would make two matches of the same map incomparable.
+    """
+    by_map: dict[str, list[str]] = {}
+    for mid in match_ids:
+        try:
+            name = read_match(mid, ("matches",))["matches"]["map_name"].iloc[0]
+        except Exception as exc:  # noqa: BLE001 - a match we cannot read is reported elsewhere
+            log.warning("zones: cannot read the map of '%s' (%s)", mid, exc)
+            continue
+        by_map.setdefault(str(name), []).append(mid)
+
+    out: dict[str, zones_mod.MapZones] = {}
+    for name, ids in by_map.items():
+        if not refit:
+            stored = zones_mod.load(name)
+            if stored is not None:
+                out[name] = stored
+                continue
+        pos, bomb = [], []
+        for mid in ids:
+            t = read_match(mid, ("positions", "bomb"), columns={"positions": _POS_FOR_ZONES})
+            pos.append(t["positions"])
+            bomb.append(t["bomb"])
+        try:
+            out[name] = zones_mod.ensure(name, pd.concat(pos, ignore_index=True),
+                                         pd.concat(bomb, ignore_index=True), ids, refit=True)
+        except ValueError as exc:
+            log.warning("zones: not fitting %s (%s)", name, exc)
+    return out
+
+
+def build_facts(match_ids: list[str] | None = None,
+                zones: dict[str, zones_mod.MapZones] | None = None,
+                ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str]]:
+    """fact_round, fact_kill and fact_player across matches, read one match at a time.
+
+    A match whose Silver fails the data-quality errors (even if nobody quarantined it) or whose
+    facts cannot be built is left out and reported in the last value, so one bad match never
+    takes the whole Gold run down or leaks wrong numbers into it.
+    """
+    ids = match_ids if match_ids is not None else list_matches()
+    if zones is None:
+        zones = ensure_map_zones(ids)
+    rounds, kills, players, skipped = [], [], [], {}
+    for mid in ids:
+        try:
+            t = read_match(mid)
+            errors = [c for c in check_match(t) if not c.ok and c.level == "error"]
+            if errors:
+                skipped[mid] = "; ".join(c.name for c in errors)
+                log.warning("Gold: skipping '%s' - failed quality checks: %s", mid, skipped[mid])
+                continue
+            z = zones.get(str(t["matches"]["map_name"].iloc[0])) if len(t["matches"]) else None
+            fr, fk, fp = build_fact_round(t, z), build_fact_kill(t, z), build_fact_player(t)
+        except Exception as exc:  # noqa: BLE001 - isolate the match, keep the batch
+            skipped[mid] = f"{type(exc).__name__}: {exc}"
+            log.error("Gold: skipping '%s' - %s", mid, skipped[mid])
+            continue
+        rounds.append(fr)
+        kills.append(fk)
+        players.append(fp)
+    frame = lambda parts: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()  # noqa: E731
+    return frame(rounds), frame(kills), frame(players), skipped
+
+
+def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.DataFrame,
+                          n_matches: int, n_rounds: int, top: int = 15,
+                          skipped: dict[str, str] | None = None) -> str:
+    lines = ["# CS2 — Team & Player Insights (Gold)", "",
+             f"Base: **{n_matches} match(es)**, **{n_rounds} rounds**.", ""]
+    lines += ["## Findings", ""]
+    if found.empty:
+        best = int(metrics["n"].max()) if not metrics.empty else 0
+        lines += ["No finding clears the evidence bar yet: every rate is still compatible with its baseline.",
+                  f"The largest sample behind any rate is {best} events. Add more matches "
+                  "(a team needs dozens of rounds per map and side before a difference is believable).", ""]
+    else:
+        lines += ["A finding means the 95% interval is entirely above/below its baseline *and*",
+                  "it survives the multiple-testing correction across every rate in this run.", "",
+                  "| Team | Map | Side | Metric | Rate | 95% CI | vs baseline | n | q | Confidence |",
+                  "|---|---|---|---|---:|---:|---:|---:|---:|---|"]
+        for _, r in found.head(top).iterrows():
+            lines.append(f"| {r['team']} | {r['map_name']} | {r['side']} | {r['metric']} | {_fmt_pct(r['rate'])} | "
+                         f"{_fmt_pct(r['ci_low'])}–{_fmt_pct(r['ci_high'])} | {_fmt_pct(r['baseline'])} "
+                         f"({r['baseline_source']}) | {int(r['n'])} | {r['q_value']:.3f} | {r['confidence']} |")
+        lines.append("")
+    if not board.empty:
+        lines += ["## Players", "",
+                  "| Player | Team | Rounds | ADR | KAST | K-D | K/D | Opening duels won |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|"]
+        for _, r in board.head(10).iterrows():
+            lines.append(f"| {r['name']} | {r['team']} | {int(r['rounds'])} | {r['adr_total']} | "
+                         f"{_fmt_pct(r['kast_pct'])} | {int(r['kills_total'])}-{int(r['deaths_total'])} | "
+                         f"{r['kd_total']} | {_fmt_pct(r['opening_win_rate'])} ({r['opening_confidence']}) |")
+        lines.append("")
+    if skipped:
+        lines += ["## Excluded matches", "", *[f"- `{m}`: {why}" for m, why in sorted(skipped.items())], ""]
+    tested = int(metrics["p_value"].notna().sum()) if "p_value" in metrics else 0
+    lines += ["## How to read this",
+              f"- {tested} rates were tested in this run. Benjamini-Hochberg caps the share of false",
+              "  findings at 5% across all of them; `q` is each finding's adjusted significance.",
+              "- `field` baselines compare a team with teams that never played it, in the same map/side slice;",
+              "  without such teams a rate is shown but never called a finding. A fixed baseline is tested",
+              "  with an exact binomial test, a field baseline with Fisher's exact test, because a field",
+              "  baseline is itself measured and carries its own error.",
+              "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
+              "- ADR and KAST are weighted by rounds played across matches.",
+              "- K-D and ADR include kills and damage after the round was decided, which is how public",
+              "  stat pages count; KAST and every rate above cover the live phase only.", ""]
+    return "\n".join(lines)
+
+
+def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """Fact tables, team metrics, findings and the insights report, from the Silver lake."""
+    ids = match_ids if match_ids is not None else list_matches()
+    zones = ensure_map_zones(ids)
+    fr, fk, fp, skipped = build_facts(ids, zones)
+    metrics = compute_team_metrics(fr) if not fr.empty else pd.DataFrame()
+    found = findings(metrics) if not metrics.empty else pd.DataFrame()
+    board = player_leaderboard(fp)
+    for name, df in (("fact_round", fr), ("fact_kill", fk), ("fact_player", fp),
+                     ("team_metrics", metrics), ("findings", found),
+                     ("player_leaderboard", board), ("map_zones", zones_mod.as_frame(list(zones.values())))):
+        path = GOLD_DIR / f"{name}.parquet"
+        if df.empty:
+            path.unlink(missing_ok=True)  # never leave a previous run's numbers next to a new report
+        else:
+            df.to_parquet(path, index=False)
+    report = build_insights_report(metrics, found, board, len(ids) - len(skipped), len(fr), skipped=skipped)
+    Path(GOLD_DIR / "insights.md").write_text(report, encoding="utf-8")
+    log.info("Gold insights: %d matches (%d excluded), %d rounds, %d metrics, %d findings.",
+             len(ids) - len(skipped), len(skipped), len(fr), len(metrics), len(found))
+    return {"fact_round": fr, "fact_kill": fk, "fact_player": fp, "team_metrics": metrics,
+            "findings": found, "leaderboard": board, "zones": zones, "skipped": skipped}

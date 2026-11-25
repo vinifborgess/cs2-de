@@ -55,17 +55,20 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
         "match_id": "string", "map_name": "string", "server_name": "string",
         "tick_rate": "float64", "n_rounds": "int64", "team_a": "string", "team_b": "string",
         "score_a": "int64", "score_b": "int64", "demo_sha256": "string",
+        "event": "string", "stage": "string", "played_on": "string", "series_id": "string",
+        "map_order": "Int64", "best_of": "Int64", "meta_source": "string",
     },
     "players": {
         "match_id": "string", "steamid": "string", "name": "string", "team": "string",
     },
     "rounds": {
         **_ID, "start_tick": "int64", "freeze_end": "int64", "end_tick": "int64",
-        "duration_s": "float64", "winner": "string", "winner_team": "string",
+        "official_end_tick": "int64", "duration_s": "float64", "winner": "string", "winner_team": "string",
         "ct_team": "string", "t_team": "string", "reason": "string", "bomb_site": "string",
     },
     "kills": {
-        **_ID, "tick": "int64", "t_s": "float64", "kill_order": "int64", "is_first_kill": "boolean",
+        **_ID, "tick": "int64", "t_s": "float64", "kill_order": "Int64", "is_first_kill": "boolean",
+        "is_post_round": "boolean",
         "attacker_steamid": "string", "attacker_name": "string", "attacker_team": "string",
         "attacker_side": "string", "victim_steamid": "string", "victim_name": "string",
         "victim_team": "string", "victim_side": "string", "assister_name": "string",
@@ -81,7 +84,7 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
         "attacker_side": "string", "victim_steamid": "string", "victim_name": "string",
         "victim_team": "string", "victim_side": "string", "weapon": "string",
         "dmg_health": "int64", "dmg_health_real": "int64", "dmg_armor": "int64",
-        "hitgroup_name": "string", "is_team_damage": "boolean",
+        "hitgroup_name": "string", "is_team_damage": "boolean", "is_post_round": "boolean",
     },
     "bomb": {
         **_ID, "tick": "int64", "t_s": "float64", "event": "string", "bombsite": "string",
@@ -97,6 +100,35 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
         **_ID, "side": "string", "team": "string", "equipment_value": "int64",
         "buy_type": "string", "n_players": "int64",
     },
+    "blinds": {
+        **_ID, "tick": "int64", "t_s": "float64", "is_post_round": "boolean",
+        "attacker_steamid": "string", "attacker_name": "string", "attacker_team": "string",
+        "attacker_side": "string", "victim_steamid": "string", "victim_name": "string",
+        "victim_team": "string", "victim_side": "string", "duration": "float32",
+        "is_self_flash": "boolean", "is_team_flash": "boolean",
+        "attacker_x": "float32", "attacker_y": "float32", "attacker_z": "float32",
+        "victim_x": "float32", "victim_y": "float32", "victim_z": "float32",
+    },
+    "grenades": {
+        **_ID, "start_tick": "int64", "end_tick": "int64", "t_start_s": "float64", "t_end_s": "float64",
+        "is_post_round": "boolean", "grenade_type": "string",
+        "thrower_steamid": "string", "thrower_name": "string", "thrower_team": "string",
+        "thrower_side": "string", "throw_x": "float32", "throw_y": "float32", "throw_z": "float32",
+        "land_x": "float32", "land_y": "float32", "land_z": "float32", "n_samples": "int64",
+    },
+    "shots": {
+        **_ID, "tick": "int64", "t_s": "float64", "is_post_round": "boolean",
+        "steamid": "string", "name": "string", "team": "string", "side": "string",
+        "weapon": "string", "is_utility": "boolean", "is_knife": "boolean", "scoped": "boolean",
+        "inaccuracy": "float32", "x": "float32", "y": "float32", "z": "float32",
+        "yaw": "float32", "pitch": "float32",
+    },
+    "item_events": {
+        **_ID, "tick": "int64", "t_s": "float64", "is_post_round": "boolean", "is_freeze_time": "boolean",
+        "action": "string",
+        "steamid": "string", "name": "string", "team": "string", "side": "string",
+        "item": "string", "cost": "int64", "x": "float32", "y": "float32", "z": "float32",
+    },
     "positions": {
         **_ID, "tick": "int64", "t_s": "float64", "steamid": "string", "name": "string",
         "team": "string", "side": "string", "x": "float32", "y": "float32", "z": "float32",
@@ -110,7 +142,7 @@ SILVER_TABLES: tuple[str, ...] = tuple(SILVER_SCHEMAS)
 
 # Bump whenever Silver logic or contracts change in a way that alters its output:
 # every cached Silver match built with an older version is rebuilt on the next run.
-SILVER_VERSION: int = 1
+SILVER_VERSION: int = 8
 
 def get_logger(name: str = "cs2") -> logging.Logger:
     logger = logging.getLogger(name)
