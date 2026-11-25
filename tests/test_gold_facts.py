@@ -56,8 +56,9 @@ def test_run_gold_facts_on_an_empty_selection_does_not_crash():
 def _metrics(rate=0.8, n=100, verdict="above"):
     return pd.DataFrame([{"team": "FURIA", "map_name": "de_mirage", "side": "CT", "metric": "pistol_win",
                           "successes": int(rate * n), "n": n, "n_matches": 4, "rate": rate, "ci_low": 0.71, "ci_high": 0.87,
-                          "baseline": 0.5, "baseline_source": "fixed", "lift": rate - 0.5, "confidence": "high",
-                          "verdict": verdict, "margin": 0.2}])
+                          "baseline": 0.5, "baseline_source": "fixed", "field_successes": pd.NA,
+                          "field_n": pd.NA, "lift": rate - 0.5, "confidence": "high", "verdict": verdict,
+                          "p_value": 1e-8, "q_value": 2e-7, "significant": True, "margin": 0.2}])
 
 
 def test_report_says_so_when_there_is_nothing_to_report_and_lists_findings_when_there_is():
@@ -66,7 +67,9 @@ def test_report_says_so_when_there_is_nothing_to_report_and_lists_findings_when_
     m = _metrics()
     full = build_insights_report(m, m, pd.DataFrame(), 4, 96)
     assert "No finding clears" not in full
-    assert "| FURIA | de_mirage | CT | pistol_win | 80.0% | 71.0%–87.0% | 50.0% (fixed) | 100 | high |" in full
+    assert ("| FURIA | de_mirage | CT | pistol_win | 80.0% | 71.0%–87.0% | 50.0% (fixed) | 100 | 0.000 | high |"
+            in full)
+    assert "1 rates were tested in this run" in full
 
 
 if __name__ == "__main__":

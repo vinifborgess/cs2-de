@@ -243,13 +243,14 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
                   f"The largest sample behind any rate is {best} events. Add more matches "
                   "(a team needs dozens of rounds per map and side before a difference is believable).", ""]
     else:
-        lines += ["A finding means the 95% interval is entirely above/below its baseline.", "",
-                  "| Team | Map | Side | Metric | Rate | 95% CI | vs baseline | n | Confidence |",
-                  "|---|---|---|---|---:|---:|---:|---:|---|"]
+        lines += ["A finding means the 95% interval is entirely above/below its baseline *and*",
+                  "it survives the multiple-testing correction across every rate in this run.", "",
+                  "| Team | Map | Side | Metric | Rate | 95% CI | vs baseline | n | q | Confidence |",
+                  "|---|---|---|---|---:|---:|---:|---:|---:|---|"]
         for _, r in found.head(top).iterrows():
             lines.append(f"| {r['team']} | {r['map_name']} | {r['side']} | {r['metric']} | {_fmt_pct(r['rate'])} | "
                          f"{_fmt_pct(r['ci_low'])}–{_fmt_pct(r['ci_high'])} | {_fmt_pct(r['baseline'])} "
-                         f"({r['baseline_source']}) | {int(r['n'])} | {r['confidence']} |")
+                         f"({r['baseline_source']}) | {int(r['n'])} | {r['q_value']:.3f} | {r['confidence']} |")
         lines.append("")
     if not board.empty:
         lines += ["## Players", "", "| Player | Team | Rounds | ADR | KAST | K/D | Opening duels won |",
@@ -260,9 +261,14 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
         lines.append("")
     if skipped:
         lines += ["## Excluded matches", "", *[f"- `{m}`: {why}" for m, why in sorted(skipped.items())], ""]
+    tested = int(metrics["p_value"].notna().sum()) if "p_value" in metrics else 0
     lines += ["## How to read this",
+              f"- {tested} rates were tested in this run. Benjamini-Hochberg caps the share of false",
+              "  findings at 5% across all of them; `q` is each finding's adjusted significance.",
               "- `field` baselines compare a team with teams that never played it, in the same map/side slice;",
-              "  without such teams a rate is shown but never called a finding.",
+              "  without such teams a rate is shown but never called a finding. A fixed baseline is tested",
+              "  with an exact binomial test, a field baseline with Fisher's exact test, because a field",
+              "  baseline is itself measured and carries its own error.",
               "- Confidence follows the number of events behind a rate: <10 insufficient, <30 low, <100 medium.",
               "- ADR and KAST are weighted by rounds played across matches.", ""]
     return "\n".join(lines)

@@ -20,7 +20,7 @@ from typing import Callable
 
 import pandas as pd
 
-from .stats import benjamini_hochberg, binomial_p, summarize_rate
+from .stats import benjamini_hochberg, binomial_p, fisher_exact_p, summarize_rate
 
 #: Slices every metric is computed on: (team, map, side) down to the team overall.
 DIMENSIONS: list[tuple[str, ...]] = [
@@ -29,7 +29,8 @@ DIMENSIONS: list[tuple[str, ...]] = [
 
 METRIC_COLUMNS = [
     "team", "map_name", "side", "metric", "successes", "n", "n_matches", "rate", "ci_low", "ci_high",
-    "baseline", "baseline_source", "lift", "confidence", "verdict", "p_value", "q_value", "significant",
+    "baseline", "baseline_source", "field_successes", "field_n", "lift", "confidence", "verdict",
+    "p_value", "q_value", "significant",
 ]
 
 #: Share of reported findings allowed to be false, controlled across one run by BH.
@@ -79,6 +80,19 @@ METRICS: dict[str, Metric] = {
 }
 
 
+def _p_value(row: pd.Series) -> float:
+    """Significance of one rate against its baseline, by the test the baseline calls for."""
+    s, n = int(row["successes"]), int(row["n"])
+    if row["baseline_source"] == "fixed":
+        return binomial_p(s, n, float(row["baseline"]))
+    # A field baseline was measured, not known, so the two rates are compared as two
+    # proportions. Treating it as a constant made its p-values far too small.
+    fs, fn = row["field_successes"], row["field_n"]
+    if pd.isna(fs) or pd.isna(fn):
+        return float("nan")
+    return fisher_exact_p(s, n - s, int(fs), int(fn) - int(fs))
+
+
 def compute_team_metrics(fact_round: pd.DataFrame, *, alpha: float = FDR_ALPHA) -> pd.DataFrame:
     """All metrics for every team across the slices in DIMENSIONS.
 
@@ -112,9 +126,15 @@ def compute_team_metrics(fact_round: pd.DataFrame, *, alpha: float = FDR_ALPHA) 
                 o_n = tot["n"].to_numpy() - g["n"] - g["vs_n"]
                 g["baseline"] = (o_s / o_n).where(o_n > 0)
                 g["baseline_source"] = pd.Series("field", index=g.index).where(o_n > 0, "none")
+                # Kept: a field baseline is an estimate, and its own counts are what the
+                # significance test needs in order to allow for that.
+                g["field_successes"] = o_s.where(o_n > 0).astype("Int64")
+                g["field_n"] = o_n.where(o_n > 0).astype("Int64")
                 g = g.drop(columns=["vs_s", "vs_n"])
             else:
                 g["baseline"], g["baseline_source"] = 0.5, "fixed"
+                g["field_successes"] = pd.Series(pd.NA, index=g.index, dtype="Int64")
+                g["field_n"] = pd.Series(pd.NA, index=g.index, dtype="Int64")
             for col in ("map_name", "side"):
                 if col not in g:
                     g[col] = "ALL"
@@ -132,8 +152,8 @@ def compute_team_metrics(fact_round: pd.DataFrame, *, alpha: float = FDR_ALPHA) 
 
     # Rows with no baseline, or too small to judge, are not part of the family being tested.
     testable = ~no_ref & (m["confidence"] != "insufficient")
-    m["p_value"] = [binomial_p(int(s), int(n), float(b)) if ok else float("nan")
-                    for s, n, b, ok in zip(m["successes"], m["n"], m["baseline"], testable)]
+    m["p_value"] = [_p_value(row) if ok else float("nan")
+                    for ok, (_, row) in zip(testable, m.iterrows())]
     rejected, q = benjamini_hochberg(m["p_value"].tolist(), alpha)
     m["q_value"], m["significant"] = q, rejected
     return m[METRIC_COLUMNS].sort_values(["team", "metric", "map_name", "side"]).reset_index(drop=True)

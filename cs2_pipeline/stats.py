@@ -129,3 +129,36 @@ def benjamini_hochberg(pvalues: list[float], alpha: float = 0.05) -> tuple[list[
         q[i] = running
         rejected[i] = running <= alpha
     return rejected, q
+
+
+def _log_hypergeom(k: int, n: int, successes: int, draws: int) -> float:
+    """log P(X = k) for the hypergeometric distribution, in log space."""
+    def lc(a: int, b: int) -> float:
+        if b < 0 or b > a:
+            return -math.inf
+        return math.lgamma(a + 1) - math.lgamma(b + 1) - math.lgamma(a - b + 1)
+    num = lc(successes, k) + lc(n - successes, draws - k)
+    return num - lc(n, draws) if num != -math.inf else -math.inf
+
+
+def fisher_exact_p(a: int, b: int, c: int, d: int) -> float:
+    """Two-sided Fisher exact test on ``[[a, b], [c, d]]``.
+
+    Use this instead of :func:`binomial_p` whenever the rate is compared with another rate
+    measured from data (a 'field' baseline) rather than with a known constant: the baseline
+    carries its own sampling error, and treating it as exact makes p-values far too small.
+    Row 1 is the team (``a`` successes, ``b`` failures), row 2 the field.
+    """
+    if min(a, b, c, d) < 0:
+        raise ValueError("counts must not be negative")
+    n = a + b + c + d
+    row1, col1 = a + b, a + c
+    if n == 0 or row1 == 0 or col1 == 0 or row1 == n or col1 == n:
+        return 1.0                     # no contrast to test: one margin is degenerate
+    obs = _log_hypergeom(a, n, col1, row1)
+    total = 0.0
+    for k in range(max(0, col1 - (c + d)), min(row1, col1) + 1):
+        lp = _log_hypergeom(k, n, col1, row1)
+        if lp <= obs + 1e-9:
+            total += math.exp(lp)
+    return min(1.0, total)
