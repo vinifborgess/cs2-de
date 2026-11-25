@@ -20,7 +20,7 @@ from typing import Callable
 
 import pandas as pd
 
-from .stats import summarize_rate
+from .stats import benjamini_hochberg, binomial_p, summarize_rate
 
 #: Slices every metric is computed on: (team, map, side) down to the team overall.
 DIMENSIONS: list[tuple[str, ...]] = [
@@ -29,8 +29,11 @@ DIMENSIONS: list[tuple[str, ...]] = [
 
 METRIC_COLUMNS = [
     "team", "map_name", "side", "metric", "successes", "n", "n_matches", "rate", "ci_low", "ci_high",
-    "baseline", "baseline_source", "lift", "confidence", "verdict",
+    "baseline", "baseline_source", "lift", "confidence", "verdict", "p_value", "q_value", "significant",
 ]
+
+#: Share of reported findings allowed to be false, controlled across one run by BH.
+FDR_ALPHA = 0.05
 
 
 def team_rounds(fact_round: pd.DataFrame) -> pd.DataFrame:
@@ -76,8 +79,14 @@ METRICS: dict[str, Metric] = {
 }
 
 
-def compute_team_metrics(fact_round: pd.DataFrame) -> pd.DataFrame:
-    """All metrics for every team across the slices in DIMENSIONS."""
+def compute_team_metrics(fact_round: pd.DataFrame, *, alpha: float = FDR_ALPHA) -> pd.DataFrame:
+    """All metrics for every team across the slices in DIMENSIONS.
+
+    One run tests dozens of team/map/side combinations at once, so each rate also carries an
+    exact two-sided binomial p-value against its baseline and a Benjamini-Hochberg q-value
+    over the whole run. ``significant`` is the q-value clearing ``alpha``; without that
+    correction a run on data with no real effect reported a finding about half the time.
+    """
     if fact_round.empty:
         return pd.DataFrame(columns=METRIC_COLUMNS)
     tr = team_rounds(fact_round)
@@ -120,16 +129,23 @@ def compute_team_metrics(fact_round: pd.DataFrame) -> pd.DataFrame:
     m["lift"], m["confidence"], m["verdict"] = [x.lift for x in sm], [x.confidence for x in sm], [x.verdict for x in sm]
     no_ref = m["baseline_source"] == "none"          # nothing to compare with: never a finding
     m.loc[no_ref, ["lift", "verdict"]] = [float("nan"), "inconclusive"]
+
+    # Rows with no baseline, or too small to judge, are not part of the family being tested.
+    testable = ~no_ref & (m["confidence"] != "insufficient")
+    m["p_value"] = [binomial_p(int(s), int(n), float(b)) if ok else float("nan")
+                    for s, n, b, ok in zip(m["successes"], m["n"], m["baseline"], testable)]
+    rejected, q = benjamini_hochberg(m["p_value"].tolist(), alpha)
+    m["q_value"], m["significant"] = q, rejected
     return m[METRIC_COLUMNS].sort_values(["team", "metric", "map_name", "side"]).reset_index(drop=True)
 
 
 def findings(metrics: pd.DataFrame, *, specific_first: bool = True) -> pd.DataFrame:
-    """Metrics whose interval clears the baseline, strongest first.
+    """Metrics that survive both the interval and the multiple-testing correction, strongest first.
 
     Ranked by the distance between the interval's nearest edge and the baseline (how sure we
     are the effect is at least that big), not by the raw rate: 9/10 ranks below 85/100.
     """
-    f = metrics[metrics["verdict"].isin(["above", "below"])].copy()
+    f = metrics[metrics["verdict"].isin(["above", "below"]) & metrics["significant"]].copy()
     if f.empty:
         return f
     f["margin"] = (f["ci_low"] - f["baseline"]).where(f["verdict"] == "above", f["baseline"] - f["ci_high"])
