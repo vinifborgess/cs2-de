@@ -12,10 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 from .config import GOLD_DIR, get_logger
-from .facts import build_fact_player, build_fact_round
+from .facts import build_fact_kill, build_fact_player, build_fact_round
 from .quality import check_match, summarize
 from .insights import compute_team_metrics, findings, player_leaderboard
 from .silver import list_matches, read_match
+from . import zones as zones_mod
 from .stats import wilson_ci
 
 log = get_logger()
@@ -204,15 +205,59 @@ def run_gold(silver: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return {"outcomes": outcomes, "impact": impact, "by_weapon": by_weapon}
 
 
-def build_facts(match_ids: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
-    """fact_round and fact_player across matches, read one match at a time.
+#: Columns the zone fitting needs out of the positions table, which is far too big to read whole.
+_POS_FOR_ZONES = ["match_id", "round_num", "steamid", "side", "tick", "x", "y"]
+
+
+def ensure_map_zones(match_ids: list[str], *, refit: bool = False) -> dict[str, zones_mod.MapZones]:
+    """Zones for every map in these matches, fitted from all of their data and then reused.
+
+    A map is fitted once and stored; refitting is explicit, because an anchor that moves
+    between runs would make two matches of the same map incomparable.
+    """
+    by_map: dict[str, list[str]] = {}
+    for mid in match_ids:
+        try:
+            name = read_match(mid, ("matches",))["matches"]["map_name"].iloc[0]
+        except Exception as exc:  # noqa: BLE001 - a match we cannot read is reported elsewhere
+            log.warning("zones: cannot read the map of '%s' (%s)", mid, exc)
+            continue
+        by_map.setdefault(str(name), []).append(mid)
+
+    out: dict[str, zones_mod.MapZones] = {}
+    for name, ids in by_map.items():
+        if not refit:
+            stored = zones_mod.load(name)
+            if stored is not None:
+                out[name] = stored
+                continue
+        pos, bomb = [], []
+        for mid in ids:
+            t = read_match(mid, ("positions", "bomb"), columns={"positions": _POS_FOR_ZONES})
+            pos.append(t["positions"])
+            bomb.append(t["bomb"])
+        try:
+            out[name] = zones_mod.ensure(name, pd.concat(pos, ignore_index=True),
+                                         pd.concat(bomb, ignore_index=True), ids, refit=True)
+        except ValueError as exc:
+            log.warning("zones: not fitting %s (%s)", name, exc)
+    return out
+
+
+def build_facts(match_ids: list[str] | None = None,
+                zones: dict[str, zones_mod.MapZones] | None = None,
+                ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, str]]:
+    """fact_round, fact_kill and fact_player across matches, read one match at a time.
 
     A match whose Silver fails the data-quality errors (even if nobody quarantined it) or whose
-    facts cannot be built is left out and reported in the third value, so one bad match never
+    facts cannot be built is left out and reported in the last value, so one bad match never
     takes the whole Gold run down or leaks wrong numbers into it.
     """
-    rounds, players, skipped = [], [], {}
-    for mid in (match_ids if match_ids is not None else list_matches()):
+    ids = match_ids if match_ids is not None else list_matches()
+    if zones is None:
+        zones = ensure_map_zones(ids)
+    rounds, kills, players, skipped = [], [], [], {}
+    for mid in ids:
         try:
             t = read_match(mid)
             errors = [c for c in check_match(t) if not c.ok and c.level == "error"]
@@ -220,15 +265,17 @@ def build_facts(match_ids: list[str] | None = None) -> tuple[pd.DataFrame, pd.Da
                 skipped[mid] = "; ".join(c.name for c in errors)
                 log.warning("Gold: skipping '%s' - failed quality checks: %s", mid, skipped[mid])
                 continue
-            fr, fp = build_fact_round(t), build_fact_player(t)
+            z = zones.get(str(t["matches"]["map_name"].iloc[0])) if len(t["matches"]) else None
+            fr, fk, fp = build_fact_round(t, z), build_fact_kill(t, z), build_fact_player(t)
         except Exception as exc:  # noqa: BLE001 - isolate the match, keep the batch
             skipped[mid] = f"{type(exc).__name__}: {exc}"
             log.error("Gold: skipping '%s' - %s", mid, skipped[mid])
             continue
         rounds.append(fr)
+        kills.append(fk)
         players.append(fp)
-    return (pd.concat(rounds, ignore_index=True) if rounds else pd.DataFrame(),
-            pd.concat(players, ignore_index=True) if players else pd.DataFrame(), skipped)
+    frame = lambda parts: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()  # noqa: E731
+    return frame(rounds), frame(kills), frame(players), skipped
 
 
 def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.DataFrame,
@@ -281,12 +328,14 @@ def build_insights_report(metrics: pd.DataFrame, found: pd.DataFrame, board: pd.
 def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame]:
     """Fact tables, team metrics, findings and the insights report, from the Silver lake."""
     ids = match_ids if match_ids is not None else list_matches()
-    fr, fp, skipped = build_facts(ids)
+    zones = ensure_map_zones(ids)
+    fr, fk, fp, skipped = build_facts(ids, zones)
     metrics = compute_team_metrics(fr) if not fr.empty else pd.DataFrame()
     found = findings(metrics) if not metrics.empty else pd.DataFrame()
     board = player_leaderboard(fp)
-    for name, df in (("fact_round", fr), ("fact_player", fp), ("team_metrics", metrics),
-                     ("findings", found), ("player_leaderboard", board)):
+    for name, df in (("fact_round", fr), ("fact_kill", fk), ("fact_player", fp),
+                     ("team_metrics", metrics), ("findings", found),
+                     ("player_leaderboard", board), ("map_zones", zones_mod.as_frame(list(zones.values())))):
         path = GOLD_DIR / f"{name}.parquet"
         if df.empty:
             path.unlink(missing_ok=True)  # never leave a previous run's numbers next to a new report
@@ -296,5 +345,5 @@ def run_gold_facts(match_ids: list[str] | None = None) -> dict[str, pd.DataFrame
     Path(GOLD_DIR / "insights.md").write_text(report, encoding="utf-8")
     log.info("Gold insights: %d matches (%d excluded), %d rounds, %d metrics, %d findings.",
              len(ids) - len(skipped), len(skipped), len(fr), len(metrics), len(found))
-    return {"fact_round": fr, "fact_player": fp, "team_metrics": metrics, "findings": found,
-            "leaderboard": board, "skipped": skipped}
+    return {"fact_round": fr, "fact_kill": fk, "fact_player": fp, "team_metrics": metrics,
+            "findings": found, "leaderboard": board, "zones": zones, "skipped": skipped}

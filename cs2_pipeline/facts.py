@@ -2,6 +2,7 @@
 
 ``fact_player``  one row per player per match: kills, ADR, KAST, opening duels, trades,
                  multi-kills and clutches.
+``fact_kill``    one row per kill, with the map zone where attacker and victim stood.
 ``fact_round``   one row per round of a match, with teams, sides, economy, opening
                  duel and bomb outcome already joined - the base of every team/map metric.
 
@@ -13,10 +14,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .zones import MapZones
+
 FACT_ROUND_COLUMNS = [
     "match_id", "map_name", "round_num", "half", "ct_team", "t_team", "winner", "winner_team",
     "reason", "duration_s", "bomb_site", "planted", "plant_t_s",
-    "fb_team", "fb_side", "fb_player", "fb_victim", "fb_weapon", "fb_t_s", "fb_won",
+    "fb_team", "fb_side", "fb_player", "fb_victim", "fb_weapon", "fb_t_s", "fb_won", "fb_zone",
     "ct_buy", "t_buy", "ct_equip", "t_equip", "n_kills",
 ]
 
@@ -27,7 +30,7 @@ def half_of(round_num: pd.Series) -> pd.Series:
                      index=round_num.index)
 
 
-def build_fact_round(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def build_fact_round(tables: dict[str, pd.DataFrame], zones: MapZones | None = None) -> pd.DataFrame:
     """Fact table for ONE match from its Silver tables."""
     rounds, kills, bomb, eco, matches = (tables[k] for k in ("rounds", "kills", "bomb", "economy", "matches"))
     f = rounds[["match_id", "round_num", "ct_team", "t_team", "winner", "winner_team",
@@ -40,12 +43,19 @@ def build_fact_round(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     f["planted"] = f["round_num"].isin(plants.index)
     f["plant_t_s"] = f["round_num"].map(plants)
 
-    first = (kills.sort_values(["round_num", "kill_order"]).drop_duplicates("round_num")
+    live = kills[~kills["is_post_round"].fillna(False).astype(bool)] if "is_post_round" in kills else kills
+    first = (live.sort_values(["round_num", "kill_order"]).drop_duplicates("round_num")
              .set_index("round_num"))
     for col, src in (("fb_team", "attacker_team"), ("fb_side", "attacker_side"), ("fb_player", "attacker_name"),
                      ("fb_victim", "victim_name"), ("fb_weapon", "weapon"), ("fb_t_s", "t_s")):
         f[col] = f["round_num"].map(first[src])
     f["fb_won"] = (f["fb_team"] == f["winner_team"]).astype("boolean").mask(f["fb_team"].isna())
+    # Where the opening duel was decided, by the victim's position.
+    if zones is None:
+        f["fb_zone"] = pd.Series(pd.NA, index=f.index, dtype="string")
+    else:
+        f = f.reset_index(drop=True)
+        f["fb_zone"] = zones.label(f["round_num"].map(first["victim_x"]), f["round_num"].map(first["victim_y"]))
 
     for side in ("CT", "T"):
         e = eco[eco["side"] == side].drop_duplicates("round_num").set_index("round_num")
@@ -168,3 +178,40 @@ def build_fact_player(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     f["post_round_damage"] = f["steamid"].map(
         post_dmg.groupby("attacker_steamid")["dmg_health_real"].sum()).fillna(0.0)
     return f[FACT_PLAYER_COLUMNS].reset_index(drop=True)
+
+
+FACT_KILL_COLUMNS = [
+    "match_id", "map_name", "event", "round_num", "half", "kill_order", "is_first_kill",
+    "is_post_round", "t_s", "attacker_steamid", "attacker_name", "attacker_team", "attacker_side",
+    "victim_steamid", "victim_name", "victim_team", "victim_side", "weapon", "headshot", "is_trade",
+    "attacker_x", "attacker_y", "victim_x", "victim_y",
+    "attacker_zone", "victim_zone", "attacker_cell", "victim_cell",
+    "round_winner_team", "attacker_won_round",
+]
+
+
+def build_fact_kill(tables: dict[str, pd.DataFrame], zones: MapZones | None = None) -> pd.DataFrame:
+    """Kill-level fact table for ONE match, with map zones when the map has been fitted.
+
+    This is the grain that answers a question like "every opening kill FURIA won on Mirage at
+    the A site": one row per kill, carrying the round's outcome so a kill can be filtered by
+    what it led to, and the zone of both players so it can be filtered by where it happened.
+    """
+    kills, rounds, matches = tables["kills"], tables["rounds"], tables["matches"]
+    k = kills.copy()
+    meta = matches.iloc[0] if len(matches) else {}
+    k["map_name"] = meta.get("map_name", pd.NA)
+    k["event"] = meta.get("event", pd.NA)
+    k["half"] = half_of(k["round_num"])
+    r = rounds.set_index("round_num")
+    k["round_winner_team"] = k["round_num"].map(r["winner_team"])
+    k["attacker_won_round"] = (k["attacker_team"] == k["round_winner_team"]).astype("boolean")
+    for who in ("attacker", "victim"):
+        if zones is None:
+            k[f"{who}_zone"] = pd.Series(pd.NA, index=k.index, dtype="string")
+            k[f"{who}_cell"] = pd.Series(pd.NA, index=k.index, dtype="string")
+        else:
+            k = k.reset_index(drop=True)
+            k[f"{who}_zone"] = zones.label(k[f"{who}_x"], k[f"{who}_y"])
+            k[f"{who}_cell"] = zones.cell(k[f"{who}_x"], k[f"{who}_y"])
+    return k[FACT_KILL_COLUMNS].reset_index(drop=True)

@@ -3,7 +3,9 @@ from tests.test_pipeline import make_match
 
 import pandas as pd
 
-from cs2_pipeline.facts import FACT_PLAYER_COLUMNS, FACT_ROUND_COLUMNS, build_fact_player, build_fact_round, half_of
+from cs2_pipeline.facts import (FACT_KILL_COLUMNS, FACT_PLAYER_COLUMNS, FACT_ROUND_COLUMNS,
+                                build_fact_kill, build_fact_player, build_fact_round, half_of)
+from cs2_pipeline.zones import MapZones
 from cs2_pipeline.silver import bronze_to_silver
 
 
@@ -167,6 +169,69 @@ def test_player_without_events_still_has_a_row_and_a_perfect_survival_round():
     f = build_fact_player(t)
     assert len(f) == 10 and f["kills"].sum() == 0 and f["clutch_attempts"].sum() == 0
     assert f["kast_pct"].eq(1.0).all()          # everyone survives every round
+
+
+# --- fact_kill -------------------------------------------------------------------------------
+ZONES = MapZones("de_test", {"A site": [100.0, 0.0], "B site": [-100.0, 0.0]},
+                 {"A site": 5, "B site": 5}, [-200.0, -200.0, 200.0, 200.0])
+
+
+def test_fact_kill_is_one_row_per_kill_with_the_round_outcome_joined():
+    _, t = _tables("fk-base", seed=24)
+    k = build_fact_kill(t, ZONES)
+    assert list(k.columns) == FACT_KILL_COLUMNS
+    assert len(k) == len(t["kills"])                       # post-round kills included, flagged
+    assert k["is_post_round"].sum() == 24 and k["is_first_kill"].sum() == 24
+    assert (k["map_name"] == "de_test").all()
+    assert k.loc[k["round_num"] <= 12, "half"].eq(1).all()
+    # A kill knows whether its own team went on to win the round.
+    r = t["rounds"].set_index("round_num")["winner_team"]
+    assert (k["round_winner_team"] == k["round_num"].map(r)).all()
+    assert (k["attacker_won_round"] == (k["attacker_team"] == k["round_winner_team"])).all()
+
+
+def test_fact_kill_carries_the_zone_of_both_players():
+    _, t = _tables("fk-zone", seed=25)
+    kills = t["kills"].copy()
+    kills.loc[kills.index[:2], ["attacker_x", "attacker_y"]] = [100.0, 0.0]
+    kills.loc[kills.index[:2], ["victim_x", "victim_y"]] = [-100.0, 0.0]
+    t["kills"] = kills
+    k = build_fact_kill(t, ZONES)
+    assert k["attacker_zone"].iloc[0] == "A site" and k["victim_zone"].iloc[0] == "B site"
+    assert k["attacker_cell"].iloc[0] == "x1y0" and k["victim_cell"].iloc[0] == "x0y0"
+    assert set(k["victim_zone"].dropna()) <= {"A site", "B site"}
+
+
+def test_zones_are_optional_and_their_columns_stay_empty_without_them():
+    _, t = _tables("fk-nozone", seed=26)
+    k = build_fact_kill(t, None)
+    assert len(k) == len(t["kills"]) and list(k.columns) == FACT_KILL_COLUMNS
+    for col in ("attacker_zone", "victim_zone", "attacker_cell", "victim_cell"):
+        assert k[col].isna().all(), col
+    assert build_fact_round(t, None)["fb_zone"].isna().all()
+
+
+def test_the_opening_duel_zone_comes_from_the_live_first_kill():
+    _, t = _tables("fr-zone", seed=27)
+    kills = t["kills"].copy()
+    live_first = kills["is_first_kill"].fillna(False).astype(bool)
+    kills.loc[live_first, ["victim_x", "victim_y"]] = [100.0, 0.0]
+    # Post-round kills sit at the other site and must not be read as the opening duel.
+    kills.loc[kills["is_post_round"].fillna(False).astype(bool), ["victim_x", "victim_y"]] = [-100.0, 0.0]
+    t["kills"] = kills
+    f = build_fact_round(t, ZONES)
+    assert (f["fb_zone"] == "A site").all()
+
+
+def test_a_round_whose_only_kill_came_after_it_was_decided_has_no_opening_duel():
+    _, t = _tables("fr-postonly", seed=28)
+    k = t["kills"]
+    live = ~k["is_post_round"].fillna(False).astype(bool)
+    t["kills"] = k[live & (k["round_num"] != 7) | ~live]      # round 7 keeps only its post-round kill
+    f = build_fact_round(t, ZONES).set_index("round_num")
+    assert f.loc[7, ["fb_team", "fb_player", "fb_zone"]].isna().all()
+    assert pd.isna(f.loc[7, "fb_won"]) and f.loc[7, "n_kills"] == 1
+    assert f.loc[6, "fb_team"] is not pd.NA and f["fb_team"].notna().sum() == 23
 
 
 if __name__ == "__main__":

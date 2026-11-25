@@ -502,6 +502,14 @@ def list_matches(include_quarantined: bool = False) -> list[str]:
     return sorted(i for i in ids if i not in skip)
 
 
-def read_match(match_id: str, tables: tuple[str, ...] | None = None) -> dict[str, pd.DataFrame]:
-    """Read the Silver tables of ONE match (all by default)."""
-    return {t: pd.read_parquet(_silver_path(t, match_id)) for t in (tables or SILVER_TABLES)}
+def read_match(match_id: str, tables: tuple[str, ...] | None = None,
+               columns: dict[str, list[str]] | None = None) -> dict[str, pd.DataFrame]:
+    """Read the Silver tables of ONE match (all by default).
+
+    ``columns`` narrows a table to the columns given, which matters for ``positions``: it is
+    the only table big enough (~85k rows a match) for reading all of it to be wasteful when
+    a caller needs two coordinates.
+    """
+    cols = columns or {}
+    return {t: pd.read_parquet(_silver_path(t, match_id), columns=cols.get(t))
+            for t in (tables or SILVER_TABLES)}
