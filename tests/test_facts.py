@@ -77,7 +77,8 @@ def _hand_match():
     def k(rnd, order, att, vic, **kw):
         row = {"round_num": rnd, "kill_order": order, "attacker_steamid": SID[att], "victim_steamid": SID[vic],
                "attacker_team": att[0].upper(), "victim_team": vic[0].upper(), "assister_name": None,
-               "headshot": False, "is_trade": False, "victim_traded": False, "is_first_kill": order == 1}
+               "headshot": False, "is_trade": False, "victim_traded": False, "is_first_kill": order == 1,
+               "is_post_round": False}
         row.update(kw)
         return row
 
@@ -93,9 +94,9 @@ def _hand_match():
         k(3, 1, "b5", "a4", victim_traded=True), k(3, 2, "a2", "b5", is_trade=True),
     ])
     dmg = pd.DataFrame([
-        {"attacker_steamid": SID["a1"], "dmg_health_real": 100, "is_team_damage": False},
-        {"attacker_steamid": SID["a1"], "dmg_health_real": 40, "is_team_damage": True},   # friendly fire: not ADR
-        *[{"attacker_steamid": SID["a3"], "dmg_health_real": 100, "is_team_damage": False}] * 3,
+        {"attacker_steamid": SID["a1"], "dmg_health_real": 100, "is_team_damage": False, "is_post_round": False},
+        {"attacker_steamid": SID["a1"], "dmg_health_real": 40, "is_team_damage": True, "is_post_round": False},
+        *[{"attacker_steamid": SID["a3"], "dmg_health_real": 100, "is_team_damage": False, "is_post_round": False}] * 3,
     ])
     pos = pd.DataFrame([{"steamid": SID[n], "round_num": r} for n in SID for r in (1, 2, 3)])
     return {"players": players, "kills": kills, "damages": dmg, "rounds": rounds, "positions": pos}
@@ -103,6 +104,27 @@ def _hand_match():
 
 def _row(f, name):
     return f[f["name"] == name].iloc[0]
+
+
+def test_post_round_events_are_counted_apart_from_every_other_metric():
+    t = _hand_match()
+    # a1 kills b5 and does 100 damage after round 1 was already decided.
+    post_k = t["kills"].iloc[[0]].copy()
+    post_k[["round_num", "kill_order", "is_post_round", "is_first_kill"]] = [1, pd.NA, True, False]
+    post_k["attacker_steamid"], post_k["victim_steamid"] = SID["a1"], SID["b5"]
+    post_k["attacker_team"], post_k["victim_team"] = "A", "B"
+    t["kills"] = pd.concat([t["kills"], post_k], ignore_index=True)
+    t["damages"] = pd.concat([t["damages"], pd.DataFrame([
+        {"attacker_steamid": SID["a1"], "dmg_health_real": 100, "is_team_damage": False, "is_post_round": True}])],
+        ignore_index=True)
+    f = build_fact_player(t)
+    base = build_fact_player(_hand_match())
+    a1, b5 = _row(f, "a1"), _row(f, "b5")
+    assert (a1["post_round_kills"], a1["post_round_damage"]) == (1, 100.0)
+    assert (b5["post_round_deaths"], b5["post_round_kills"]) == (1, 0)
+    # The published K-D is kills + post_round_kills; every live metric is untouched.
+    for col in ("kills", "deaths", "damage", "adr", "kast_rounds", "kast_pct", "clutch_attempts", "k2", "k3"):
+        assert f.set_index("name")[col].equals(base.set_index("name")[col]), col
 
 
 def test_fact_player_counts_match_the_hand_worked_answer():

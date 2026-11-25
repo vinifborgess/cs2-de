@@ -81,6 +81,14 @@ def _kills_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     if k.empty:
         return [_c("kills.not_empty", "error", False, "no kills")]
     out: list[Check] = []
+    # Kills after the round was decided obey none of the rules below: they carry no order,
+    # the victim may already have died in the live phase and they can exceed ten per round.
+    post = k["is_post_round"].fillna(False).astype(bool) if "is_post_round" in k else pd.Series(False, index=k.index)
+    out.append(_c("kills.post_round_has_no_order", "error", k.loc[post, "kill_order"].isna().all(),
+                  f"{int(k.loc[post, 'kill_order'].notna().sum())} post-round kills carry a kill_order"))
+    k = k[~post]
+    if k.empty:
+        return out + [_c("kills.not_empty", "error", False, "no kills in the live phase of any round")]
     firsts = k.groupby("round_num")["is_first_kill"].sum()
     out.append(_c("kills.one_first_kill_per_round", "error", (firsts == 1).all(), f"rounds with != 1 first kill: {list(firsts[firsts != 1].index)[:10]}"))
     contiguous = k.groupby("round_num")["kill_order"].apply(lambda s: sorted(s) == list(range(1, len(s) + 1)))
@@ -91,7 +99,7 @@ def _kills_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     out.append(_c("kills.at_most_10_per_round", "error", (per_round <= 10).all(), f"max {per_round.max()}"))
     dur = k["round_num"].map(_durations(r))
     off = (~k["t_s"].between(0, dur + 1)).sum()
-    out.append(_c("kills.inside_round", "error", off == 0, f"{off} kills outside [0, duration]"))
+    out.append(_c("kills.inside_round", "error", off == 0, f"{off} live kills outside [0, duration]"))
     mixed = (k["attacker_team"].isna() | k["victim_team"].isna() | (k["attacker_team"] == k["victim_team"])).sum()
     out.append(_c("kills.opposing_teams", "error", mixed == 0, f"{mixed} kills without two opposing teams"))
     # Cross-table: a killed player must show 0 health in the next position sample.

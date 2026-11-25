@@ -97,24 +97,41 @@ def normalize_side(s: pd.Series) -> pd.Series:
     return s.astype("string").str.strip().str.lower().map(_SIDE_MAP).astype("string")
 
 
-def assign_round(df: pd.DataFrame, rounds: pd.DataFrame, tick_col: str = "tick") -> pd.DataFrame:
+def assign_round(df: pd.DataFrame, rounds: pd.DataFrame, tick_col: str = "tick",
+                 *, include_post_round: bool = False) -> pd.DataFrame:
     """Attach ``round_num`` to events by tick range; drop events outside any round.
 
     ``rounds`` must hold only the rounds that are kept (no knife rounds). Events that
-    happen in warm-up or between rounds fall outside every [start_tick, end_tick] and
-    are dropped. That includes post-round events: once the round is decided (``end_tick``),
-    a kill before ``official_end_tick`` no longer counts toward its outcome.
+    happen in warm-up or between rounds fall outside every round window and are dropped.
+
+    A round is decided at ``end_tick`` but only closes at ``official_end_tick``, and players
+    keep shooting in between. Those post-round events say nothing about how the round was
+    won, so by default the window ends at ``end_tick`` and they are dropped. With
+    ``include_post_round`` the window runs to ``official_end_tick`` and an ``is_post_round``
+    flag marks them, which is what lets player totals be reconciled with the public record
+    while every round-outcome metric still ignores them.
     """
+    cols = ["round_num", "start_tick", "end_tick"]
+    if include_post_round:
+        cols.append("official_end_tick")
     if df.empty:
-        return df.assign(round_num=pd.Series(dtype="int64"))
+        out = df.assign(round_num=pd.Series(dtype="int64"))
+        return out.assign(is_post_round=pd.Series(dtype="bool")) if include_post_round else out
     left = df.copy()
     left["_tick"] = left[tick_col].astype("int64")
     left = left.sort_values("_tick", kind="stable")
-    right = (rounds[["round_num", "start_tick", "end_tick"]]
-             .rename(columns={"start_tick": "_start", "end_tick": "_end"})
+    right = (rounds[cols].rename(columns={"start_tick": "_start", "end_tick": "_end",
+                                          "official_end_tick": "_official"})
              .astype("int64").sort_values("_start"))
     merged = pd.merge_asof(left, right, left_on="_tick", right_on="_start", direction="backward")
-    merged = merged[merged["_tick"] <= merged["_end"]]
+    if include_post_round:
+        # official_end_tick can be missing or stale; never let it shrink the live window.
+        merged["_official"] = merged[["_official", "_end"]].max(axis=1)
+        merged = merged[merged["_tick"] <= merged["_official"]]
+        merged["is_post_round"] = merged["_tick"] > merged["_end"]
+        merged = merged.drop(columns=["_official"])
+    else:
+        merged = merged[merged["_tick"] <= merged["_end"]]
     return merged.drop(columns=["_tick", "_start", "_end"]).reset_index(drop=True)
 
 
@@ -247,7 +264,7 @@ def clean_rounds(base: pd.DataFrame, positions: pd.DataFrame, bomb: pd.DataFrame
 
 def clean_kills(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
                 tick_rate: float, match_id: str) -> pd.DataFrame:
-    df = assign_round(raw, rounds)
+    df = assign_round(raw, rounds, include_post_round=True)
     df = add_clock(df, rounds, tick_rate)
     df = df[df["t_s"] >= 0]
     for side in ("attacker_side", "victim_side"):
@@ -259,14 +276,18 @@ def clean_kills(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str]
     df = df[(df["weapon"].astype("string").str.lower() != "world")
             & (df["attacker_team"] != df["victim_team"])]
     df = df.sort_values(["round_num", "tick"], kind="stable")
-    df["kill_order"] = df.groupby("round_num").cumcount() + 1
-    df["is_first_kill"] = df["kill_order"] == 1
+    # Ordering covers the live phase only: a kill after the round was decided is never the
+    # opening duel and must not shift the order of the kills that decided it.
+    live = ~df["is_post_round"]
+    df["kill_order"] = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    df.loc[live, "kill_order"] = df[live].groupby("round_num").cumcount() + 1
+    df["is_first_kill"] = (df["kill_order"] == 1).fillna(False)
     return _finish(df, "kills", match_id)
 
 
 def clean_damages(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
                   tick_rate: float, match_id: str) -> pd.DataFrame:
-    df = assign_round(raw, rounds)
+    df = assign_round(raw, rounds, include_post_round=True)
     df = add_clock(df, rounds, tick_rate)
     df = df[df["t_s"] >= 0]
     for side in ("attacker_side", "victim_side"):

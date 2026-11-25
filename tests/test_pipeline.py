@@ -259,6 +259,24 @@ def test_restarted_round_does_not_break_a_whole_match():
     assert len(s["rounds"]) == 24 and s["rounds"]["round_num"].is_unique
 
 
+def test_assign_round_can_keep_post_round_events_flagged():
+    from cs2_pipeline.silver import assign_round
+    rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [0, 1000], "end_tick": [800, 1800],
+                           "official_end_tick": [900, 1900]})
+    ev = pd.DataFrame({"tick": [400, 850, 950, 1500, 1850]})   # 950 is between the rounds
+    out = assign_round(ev, rounds, include_post_round=True)
+    assert out["tick"].tolist() == [400, 850, 1500, 1850]
+    assert out["is_post_round"].tolist() == [False, True, False, True]
+    assert assign_round(ev, rounds)["tick"].tolist() == [400, 1500]      # default drops them
+    # A stale official_end_tick (before the round's own end) must not shrink the live window,
+    # and must not turn live ticks into post-round ones; events past the end are then dropped.
+    short = rounds.assign(official_end_tick=[700, 1700])
+    out = assign_round(pd.DataFrame({"tick": [400, 750, 850, 1500, 1750, 1850]}), short,
+                       include_post_round=True)
+    assert out["tick"].tolist() == [400, 750, 1500, 1750]
+    assert not out["is_post_round"].any()
+
+
 def test_assign_round_drops_warmup_and_gaps():
     rounds = pd.DataFrame({"round_num": [1, 2], "start_tick": [100, 500], "end_tick": [400, 900]})
     ev = pd.DataFrame({"tick": [50, 100, 400, 450, 500, 901]})
@@ -275,7 +293,14 @@ def test_silver_contracts_noise_and_sides():
 
     r, k = s["rounds"], s["kills"]
     assert len(r) == exp["n_rounds"] and 0 not in r["round_num"].tolist()  # knife round dropped
-    assert len(k) == exp["n_kills"]                                        # world, team and post-round kills removed
+    live = k[~k["is_post_round"]]
+    assert len(live) == exp["n_kills"]                                     # world and team kills removed
+    # The generator plays one kill per round after the round is decided: kept, but flagged,
+    # with no kill_order, so it can never be mistaken for part of the round.
+    post = k[k["is_post_round"]]
+    assert len(post) == exp["n_rounds"] and post["kill_order"].isna().all()
+    assert not post["is_first_kill"].any()
+    k = live
     assert set(k["attacker_side"]) <= {"CT", "T"} and (k["attacker_team"] != k["victim_team"]).all()
     assert (k["t_s"] >= 0).all() and k["is_first_kill"].sum() == exp["n_rounds"]
     first = k[k["is_first_kill"]].set_index("round_num")["attacker_name"].to_dict()

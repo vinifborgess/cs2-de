@@ -61,11 +61,12 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
     },
     "rounds": {
         **_ID, "start_tick": "int64", "freeze_end": "int64", "end_tick": "int64",
-        "duration_s": "float64", "winner": "string", "winner_team": "string",
+        "official_end_tick": "int64", "duration_s": "float64", "winner": "string", "winner_team": "string",
         "ct_team": "string", "t_team": "string", "reason": "string", "bomb_site": "string",
     },
     "kills": {
-        **_ID, "tick": "int64", "t_s": "float64", "kill_order": "int64", "is_first_kill": "boolean",
+        **_ID, "tick": "int64", "t_s": "float64", "kill_order": "Int64", "is_first_kill": "boolean",
+        "is_post_round": "boolean",
         "attacker_steamid": "string", "attacker_name": "string", "attacker_team": "string",
         "attacker_side": "string", "victim_steamid": "string", "victim_name": "string",
         "victim_team": "string", "victim_side": "string", "assister_name": "string",
@@ -81,7 +82,7 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
         "attacker_side": "string", "victim_steamid": "string", "victim_name": "string",
         "victim_team": "string", "victim_side": "string", "weapon": "string",
         "dmg_health": "int64", "dmg_health_real": "int64", "dmg_armor": "int64",
-        "hitgroup_name": "string", "is_team_damage": "boolean",
+        "hitgroup_name": "string", "is_team_damage": "boolean", "is_post_round": "boolean",
     },
     "bomb": {
         **_ID, "tick": "int64", "t_s": "float64", "event": "string", "bombsite": "string",
@@ -110,7 +111,7 @@ SILVER_TABLES: tuple[str, ...] = tuple(SILVER_SCHEMAS)
 
 # Bump whenever Silver logic or contracts change in a way that alters its output:
 # every cached Silver match built with an older version is rebuilt on the next run.
-SILVER_VERSION: int = 5
+SILVER_VERSION: int = 6
 
 def get_logger(name: str = "cs2") -> logging.Logger:
     logger = logging.getLogger(name)

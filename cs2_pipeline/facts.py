@@ -61,6 +61,7 @@ FACT_PLAYER_COLUMNS = [
     "match_id", "steamid", "name", "team", "rounds", "kills", "deaths", "assists", "headshots",
     "damage", "adr", "kast_rounds", "kast_pct", "opening_kills", "opening_deaths",
     "trade_kills", "traded_deaths", "k2", "k3", "k4", "k5", "clutch_attempts", "clutch_wins",
+    "post_round_kills", "post_round_deaths", "post_round_damage",
 ]
 
 
@@ -95,9 +96,21 @@ def _clutches(kills: pd.DataFrame, rounds: pd.DataFrame, roster: dict[str, list[
 
 
 def build_fact_player(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Per-player match stats for ONE match from its Silver tables."""
+    """Per-player match stats for ONE match from its Silver tables.
+
+    Every metric is computed on the live phase of each round. Kills, deaths and damage that
+    happened after the round was decided are counted separately in the ``post_round_*``
+    columns: public stat pages include them, so the published K-D is
+    ``kills + post_round_kills``, while rates like KAST and ADR stay about the rounds as
+    they were actually played.
+    """
     players, kills, damages, rounds, pos = (tables[k] for k in ("players", "kills", "damages", "rounds", "positions"))
     f = players[["match_id", "steamid", "name", "team"]].copy()
+    post_kills = kills[kills["is_post_round"].fillna(False).astype(bool)]
+    post_dmg = damages[damages["is_post_round"].fillna(False).astype(bool)
+                       & ~damages["is_team_damage"].fillna(False).astype(bool)]
+    kills = kills[~kills["is_post_round"].fillna(False).astype(bool)]
+    damages = damages[~damages["is_post_round"].fillna(False).astype(bool)]
     n_rounds = len(rounds)
     seen = pos.groupby("steamid")["round_num"].nunique() if not pos.empty else pd.Series(dtype=int)
     f["rounds"] = f["steamid"].map(seen).fillna(n_rounds).astype(int)
@@ -149,4 +162,9 @@ def build_fact_player(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     cl = _clutches(kills, rounds, roster)
     f["clutch_attempts"] = f["steamid"].map(cl.groupby("steamid").size()).fillna(0).astype(int)
     f["clutch_wins"] = f["steamid"].map(cl[cl["won"]].groupby("steamid").size()).fillna(0).astype(int)
+
+    f["post_round_kills"] = f["steamid"].map(post_kills.groupby("attacker_steamid").size()).fillna(0).astype(int)
+    f["post_round_deaths"] = f["steamid"].map(post_kills.groupby("victim_steamid").size()).fillna(0).astype(int)
+    f["post_round_damage"] = f["steamid"].map(
+        post_dmg.groupby("attacker_steamid")["dmg_health_real"].sum()).fillna(0.0)
     return f[FACT_PLAYER_COLUMNS].reset_index(drop=True)
