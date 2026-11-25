@@ -55,6 +55,8 @@ SILVER_SCHEMAS: dict[str, dict[str, str]] = {
         "match_id": "string", "map_name": "string", "server_name": "string",
         "tick_rate": "float64", "n_rounds": "int64", "team_a": "string", "team_b": "string",
         "score_a": "int64", "score_b": "int64", "demo_sha256": "string",
+        "event": "string", "stage": "string", "played_on": "string", "series_id": "string",
+        "map_order": "Int64", "best_of": "Int64", "meta_source": "string",
     },
     "players": {
         "match_id": "string", "steamid": "string", "name": "string", "team": "string",
@@ -111,7 +113,7 @@ SILVER_TABLES: tuple[str, ...] = tuple(SILVER_SCHEMAS)
 
 # Bump whenever Silver logic or contracts change in a way that alters its output:
 # every cached Silver match built with an older version is rebuilt on the next run.
-SILVER_VERSION: int = 6
+SILVER_VERSION: int = 7
 
 def get_logger(name: str = "cs2") -> logging.Logger:
     logger = logging.getLogger(name)

@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .bronze import read_bronze, read_manifest
+from .catalog import entry_for
 from .config import SILVER_DIR, SILVER_SCHEMAS, SILVER_TABLES, SILVER_VERSION, get_logger
 from .utils import coerce_schema, missing_columns
 
@@ -338,6 +339,7 @@ def build_matches(rounds: pd.DataFrame, header: pd.DataFrame, manifest: dict | N
         "tick_rate": float(h["tick_rate"]), "n_rounds": len(rounds), "team_a": a, "team_b": b,
         "score_a": int(wins.get(a, 0)), "score_b": int(wins.get(b, 0)),
         "demo_sha256": (manifest or {}).get("demo_sha256"),
+        **entry_for(match_id),   # event context: from data/catalog.json, else derived, else null
     }
     return _finish(pd.DataFrame([row]), "matches", match_id)
 
