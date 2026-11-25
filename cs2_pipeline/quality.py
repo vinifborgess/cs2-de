@@ -157,13 +157,58 @@ def _events_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
     return out
 
 
+def _utility_checks(t: dict[str, pd.DataFrame]) -> list[Check]:
+    """Flashes, grenades, shots and item events: tables promoted to Silver after the core ones."""
+    b, g, sh, ie, r = t["blinds"], t["grenades"], t["shots"], t["item_events"], t["rounds"]
+    out: list[Check] = []
+    rounds = set(r["round_num"])
+    for name, df, col in (("blinds", b, "round_num"), ("grenades", g, "round_num"),
+                          ("shots", sh, "round_num"), ("item_events", ie, "round_num")):
+        stray = (~df[col].isin(rounds)).sum() if not df.empty else 0
+        out.append(_c(f"{name}.inside_known_rounds", "error", stray == 0,
+                      f"{stray} rows on rounds that are not in the rounds table"))
+    if not b.empty:
+        # A flash lasts at most ~5 s in CS2; anything longer means the duration is not seconds.
+        bad = (~b["duration"].between(0, 6, inclusive="right")).sum()
+        out.append(_c("blinds.duration_plausible", "error", bad == 0, f"{bad} flashes outside (0, 6] s"))
+        out.append(_c("blinds.self_and_team_exclusive", "error",
+                      not (b["is_self_flash"] & b["is_team_flash"]).any(),
+                      "a flash cannot be both a self-flash and a team-flash"))
+    if not g.empty:
+        out.append(_c("grenades.one_row_per_throw", "error",
+                      not g.duplicated(["round_num", "thrower_steamid", "start_tick"]).any(),
+                      "the same throw appears more than once"))
+        out.append(_c("grenades.flight_forwards", "error", (g["end_tick"] >= g["start_tick"]).all(),
+                      "a grenade that lands before it is thrown"))
+        known = {"he", "smoke", "flashbang", "molotov", "incendiary", "decoy"}
+        odd = sorted(set(g["grenade_type"].dropna()) - known)
+        out.append(_c("grenades.known_types", "warning", not odd, f"unknown grenade types: {odd}"))
+    if not sh.empty:
+        out.append(_c("shots.weapon_prefix_stripped", "error",
+                      not sh["weapon"].astype("string").str.startswith("weapon_").any(),
+                      "weapon names still carry the shots table's weapon_ prefix"))
+        # Every shot needs a shooter on a known team, or per-player accuracy would silently drift.
+        unknown = sh["team"].isna().sum()
+        out.append(_c("shots.shooter_known", "error", unknown == 0, f"{unknown} shots without a team"))
+    if not ie.empty:
+        out.append(_c("item_events.known_actions", "error",
+                      set(ie["action"].dropna()) <= {"purchase", "pickup", "drop"},
+                      f"unexpected actions: {sorted(set(ie['action'].dropna()) - {'purchase', 'pickup', 'drop'})}"))
+        out.append(_c("item_events.freeze_flag_matches_clock", "error",
+                      (ie["is_freeze_time"] == (ie["t_s"] < 0)).all(),
+                      "is_freeze_time disagrees with t_s"))
+        out.append(_c("item_events.costs_not_negative", "error", (ie["cost"] >= 0).all(),
+                      "a negative item cost"))
+    return out
+
+
 def check_match(tables: dict[str, pd.DataFrame]) -> list[Check]:
     """Run every invariant on the Silver tables of ONE match."""
     missing = [n for n in SILVER_TABLES if n not in tables]
     if missing:
         return [_c("silver.tables_present", "error", False, f"missing tables: {missing}")]
     out: list[Check] = []
-    for section in (_rounds_checks, _kills_checks, _positions_checks, _events_checks):
+    for section in (_rounds_checks, _kills_checks, _positions_checks, _events_checks, _utility_checks):
         try:
             out += section(tables)
         except Exception as exc:  # noqa: BLE001 - a checker must report bad data, never crash on it

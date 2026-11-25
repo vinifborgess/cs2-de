@@ -319,6 +319,91 @@ def clean_smokes(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str
     return _finish(df, "smokes", match_id)
 
 
+def clean_blinds(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                 tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per flash: who blinded whom, and for how long."""
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df = df[df["t_s"] >= 0]
+    for side in ("attacker_side", "victim_side"):
+        df[side] = normalize_side(df[side])
+    df["attacker_team"] = _team(df["attacker_steamid"], team_of)
+    df["victim_team"] = _team(df["victim_steamid"], team_of)
+    df = df.dropna(subset=["attacker_steamid", "victim_steamid", "attacker_team", "victim_team"])
+    # Flashing yourself and flashing a team-mate are different mistakes, and neither is an
+    # enemy flash, so both are marked rather than dropped.
+    df["is_self_flash"] = df["attacker_steamid"] == df["victim_steamid"]
+    df["is_team_flash"] = (df["attacker_team"] == df["victim_team"]) & ~df["is_self_flash"]
+    return _finish(df.sort_values("tick", kind="stable"), "blinds", match_id)
+
+
+def clean_grenades(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                   tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per grenade THROWN, not per trajectory sample.
+
+    Bronze stores the flight path, one row per tick, which is ~70k rows a match and belongs
+    to the replay rather than to analysis. Silver keeps the throw: who threw what, when it
+    left the hand and where it ended up.
+    """
+    if raw.empty:
+        return _finish(raw.assign(round_num=pd.Series(dtype="int64")), "grenades", match_id)
+    df = raw.sort_values("tick", kind="stable")
+    key = ["entity_id", "entity_serial", "start_tick"]
+    first = df.groupby(key, as_index=False).first().rename(columns={"x": "throw_x", "y": "throw_y", "z": "throw_z"})
+    last = df.groupby(key, as_index=False).last()[key + ["x", "y", "z"]].rename(
+        columns={"x": "land_x", "y": "land_y", "z": "land_z"})
+    n = df.groupby(key, as_index=False).size().rename(columns={"size": "n_samples"})
+    g = first.merge(last, on=key).merge(n, on=key).rename(columns={"type": "grenade_type"})
+
+    g = assign_round(g, rounds, tick_col="start_tick", include_post_round=True)
+    g = add_clock(g, rounds, tick_rate, tick_col="start_tick", out="t_start_s")
+    g = add_clock(g, rounds, tick_rate, tick_col="end_tick", out="t_end_s")
+    g = g[g["t_start_s"] >= 0]
+    g["thrower_side"] = normalize_side(g["thrower_side"])
+    g["thrower_team"] = _team(g["thrower_steamid"], team_of)
+    return _finish(g.sort_values("start_tick", kind="stable"), "grenades", match_id)
+
+
+#: Weapon names in the shots table carry a ``weapon_`` prefix the other tables do not use.
+_UTILITY = {"flashbang", "hegrenade", "smokegrenade", "molotov", "incgrenade", "decoy"}
+
+
+def clean_shots(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                tick_rate: float, match_id: str) -> pd.DataFrame:
+    """One row per shot fired. Grenade throws and knife swings are marked, not dropped."""
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df = df[df["t_s"] >= 0]
+    df["side"] = normalize_side(df["side"])
+    df["team"] = _team(df["steamid"], team_of)
+    df = df.dropna(subset=["steamid", "team"])
+    # Strip the prefix so the weapon joins with the kills and damages tables.
+    df["weapon"] = df["weapon"].astype("string").str.removeprefix("weapon_")
+    df["is_utility"] = df["weapon"].isin(_UTILITY)
+    df["is_knife"] = df["weapon"].str.startswith("knife", na=False)
+    return _finish(df.sort_values("tick", kind="stable"), "shots", match_id)
+
+
+def clean_item_events(raw: pd.DataFrame, rounds: pd.DataFrame, team_of: dict[str, str],
+                      tick_rate: float, match_id: str) -> pd.DataFrame:
+    """Buys, pickups and drops, with what each one cost.
+
+    Unlike the other event tables this one keeps freeze time (``t_s`` below zero), because
+    that is when buying happens; ``is_freeze_time`` marks it. Freeze can be long - 20 s
+    normally, but over 200 s across a tactical pause or half-time - and in the first round it
+    also covers the warm-up when the recording starts there, so an analyst looking at what a
+    team bought for one round should expect warm-up activity inside round 1's freeze.
+    """
+    df = assign_round(raw, rounds, include_post_round=True)
+    df = add_clock(df, rounds, tick_rate)
+    df["is_freeze_time"] = df["t_s"] < 0
+    df["side"] = normalize_side(df["side"])
+    df["team"] = _team(df["steamid"], team_of)
+    df = df.dropna(subset=["steamid", "team"])
+    df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0)
+    return _finish(df.sort_values("tick", kind="stable"), "item_events", match_id)
+
+
 def clean_economy(raw: pd.DataFrame, rounds: pd.DataFrame, match_id: str) -> pd.DataFrame:
     df = raw[raw["round_num"].isin(rounds["round_num"])].copy()
     df["side"] = normalize_side(df["side"])
@@ -374,6 +459,10 @@ def bronze_to_silver(match_id: str, *, force: bool = False) -> dict[str, pd.Data
         "bomb": bomb,
         "smokes": clean_smokes(read_bronze(match_id, "smokes"), rounds, team_of, tick_rate, match_id),
         "economy": clean_economy(read_bronze(match_id, "round_economy"), rounds, match_id),
+        "blinds": clean_blinds(read_bronze(match_id, "blinds"), rounds, team_of, tick_rate, match_id),
+        "grenades": clean_grenades(read_bronze(match_id, "grenades"), rounds, team_of, tick_rate, match_id),
+        "shots": clean_shots(read_bronze(match_id, "shots"), rounds, team_of, tick_rate, match_id),
+        "item_events": clean_item_events(read_bronze(match_id, "item_events"), rounds, team_of, tick_rate, match_id),
         "positions": positions,
     }
     for name, df in tables.items():

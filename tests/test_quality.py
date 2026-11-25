@@ -22,7 +22,7 @@ def _failed(tables):
 def test_clean_match_passes_every_check():
     tables = _clean()
     checks = check_match(tables)
-    assert len(checks) >= 25
+    assert len(checks) >= 40
     assert summarize(checks) == (0, 0), [str(c) for c in checks if not c.ok]
     assert summarize(run_checks("q-base")) == (0, 0)
 
@@ -71,6 +71,23 @@ def _orphan_defuse(t):
     b = t["bomb"]; row = b.iloc[[0]].copy(); row["event"] = "defuse"; row["round_num"] = 4; row["t_s"] = 50.0
     t["bomb"] = pd.concat([b, row], ignore_index=True)
 def _lose_economy(t): t["economy"].drop(index=0, inplace=True)
+def _blind_outside_rounds(t): t["blinds"].loc[0, "round_num"] = 999
+def _grenade_outside_rounds(t): t["grenades"].loc[0, "round_num"] = 999
+def _shot_outside_rounds(t): t["shots"].loc[0, "round_num"] = 999
+def _item_outside_rounds(t): t["item_events"].loc[0, "round_num"] = 999
+def _long_flash(t): t["blinds"].loc[0, "duration"] = 9.0
+def _flash_both_kinds(t):
+    b = t["blinds"]; b.loc[0, ["is_self_flash", "is_team_flash"]] = [True, True]
+def _duplicate_throw(t):
+    g = t["grenades"]; t["grenades"] = pd.concat([g, g.iloc[[0]]], ignore_index=True)
+def _grenade_lands_first(t): t["grenades"].loc[0, "end_tick"] = t["grenades"].loc[0, "start_tick"] - 10
+def _unknown_grenade(t): t["grenades"].loc[0, "grenade_type"] = "plasma"
+def _prefixed_weapon(t): t["shots"].loc[0, "weapon"] = "weapon_ak47"
+def _shooter_without_team(t): t["shots"].loc[0, "team"] = pd.NA
+def _unknown_item_action(t): t["item_events"].loc[0, "action"] = "teleport"
+def _freeze_flag_lies(t):
+    ie = t["item_events"]; ie.loc[0, "is_freeze_time"] = not bool(ie.loc[0, "is_freeze_time"])
+def _negative_cost(t): t["item_events"].loc[0, "cost"] = -5
 def _ordered_post_round_kill(t):
     k = t["kills"]; idx = k.index[k["is_post_round"].fillna(False).astype(bool)][0]
     k.loc[idx, "kill_order"] = 99
@@ -95,6 +112,16 @@ MUTATIONS = {
     "economy.two_sides_per_round": _lose_economy, "rounds.starts_at_round_1": _mid_match,
     "rounds.bomb_reason_has_plant": _bomb_without_plant, "matches.has_winner": _no_winner_score,
     "economy.available": _empty_economy, "kills.post_round_has_no_order": _ordered_post_round_kill,
+    "blinds.inside_known_rounds": _blind_outside_rounds,
+    "grenades.inside_known_rounds": _grenade_outside_rounds,
+    "shots.inside_known_rounds": _shot_outside_rounds,
+    "item_events.inside_known_rounds": _item_outside_rounds,
+    "blinds.duration_plausible": _long_flash, "blinds.self_and_team_exclusive": _flash_both_kinds,
+    "grenades.one_row_per_throw": _duplicate_throw, "grenades.flight_forwards": _grenade_lands_first,
+    "grenades.known_types": _unknown_grenade, "shots.weapon_prefix_stripped": _prefixed_weapon,
+    "shots.shooter_known": _shooter_without_team, "item_events.known_actions": _unknown_item_action,
+    "item_events.freeze_flag_matches_clock": _freeze_flag_lies,
+    "item_events.costs_not_negative": _negative_cost,
 }
 
 

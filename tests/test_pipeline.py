@@ -4,11 +4,7 @@ Run with ``python -m tests.test_pipeline`` (or ``pytest``). Set CS2_TEST_DEMO to
 real .dem path to also run an end-to-end check on it.
 """
 import os
-import tempfile
 from pathlib import Path
-
-# The data lake location is read at import time: point it at a scratch directory first.
-os.environ["CS2_DATA_DIR"] = tempfile.mkdtemp(prefix="cs2-test-")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -50,6 +46,7 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
     }, schema_overrides={"steamid": pl.UInt64})
 
     rounds, kills, damages, snaps, smokes, econ, bomb = [], [], [], [], [], [], []
+    blinds, grenades, shots, items = [], [], [], []
     expected_first, expected_kills = {}, 0
 
     def kill_row(tick, a, v, weapon="ak47", a_side=None, v_side=None):
@@ -116,6 +113,37 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         smokes.append({"start_tick": fe + 500, "end_tick": fe + 1900, "thrower_name": name_of[teams["Alpha"][0]],
                        "thrower_steamid": teams["Alpha"][0], "thrower_side": SIDE[side_of("Alpha", rnd)],
                        "entity_id": 2, "entity_serial": 2, "x": 7.0, "y": 8.0, "z": 9.0})
+
+        # Utility, one of each shape Silver has to handle: an enemy flash, a self-flash and a
+        # team flash; a grenade sampled over several ticks; shots including utility and knife;
+        # purchases in freeze time and a pickup once the round is live.
+        flasher, mate = teams[fb_team][0], teams[fb_team][1]
+        enemy = teams[other][0]
+        for victim, dur in ((enemy, 2.5), (flasher, 0.4), (mate, 1.2)):
+            blinds.append({"tick": fe + 300, "attacker_steamid": flasher, "attacker_name": name_of[flasher],
+                           "attacker_side": SIDE[side_of(fb_team, rnd)], "attacker_x": 1.0, "attacker_y": 2.0,
+                           "attacker_z": 3.0, "victim_steamid": victim, "victim_name": name_of[victim],
+                           "victim_side": SIDE[side_of(team_of[victim], rnd)], "victim_x": 4.0, "victim_y": 5.0,
+                           "victim_z": 6.0, "duration": dur, "attacker_entity_id": 1, "attacker_entity_serial": 1,
+                           "victim_entity_id": 2, "victim_entity_serial": 2})
+        for i, t in enumerate((fe + 250, fe + 280, fe + 310)):   # one throw, three samples
+            grenades.append({"tick": t, "thrower_name": name_of[flasher], "thrower_steamid": flasher,
+                             "thrower_side": SIDE[side_of(fb_team, rnd)], "type": "flashbang",
+                             "entity_id": 7, "entity_serial": 7, "x": 10.0 + i, "y": 20.0 + i, "z": 30.0,
+                             "start_tick": fe + 250, "end_tick": fe + 310})
+        for w in ("weapon_ak47", "weapon_flashbang", "weapon_knife_karambit"):
+            shots.append({"tick": fe + 200, "steamid": flasher, "name": name_of[flasher],
+                          "side": SIDE[side_of(fb_team, rnd)], "weapon": w, "scoped": False,
+                          "inaccuracy": 0.01, "num_bullets_remaining": 20, "entity_id": 1, "entity_serial": 1,
+                          "x": 1.0, "y": 2.0, "z": 3.0, "pitch": 0.0, "yaw": 90.0})
+        items.append({"tick": fe - 320, "action": "purchase", "steamid": flasher, "name": name_of[flasher],
+                      "side": SIDE[side_of(fb_team, rnd)], "item": "ak47", "cost": 2700, "entity_id": 1,
+                      "entity_serial": 1, "x": 1.0, "y": 2.0, "z": 3.0,
+                      "original_owner_steamid": flasher, "near_buy_zone": True})
+        items.append({"tick": fe + 600, "action": "pickup", "steamid": mate, "name": name_of[mate],
+                      "side": SIDE[side_of(fb_team, rnd)], "item": "awp", "cost": 0, "entity_id": 2,
+                      "entity_serial": 2, "x": 4.0, "y": 5.0, "z": 6.0,
+                      "original_owner_steamid": flasher, "near_buy_zone": False})
         for side in ("CT", "T"):
             econ.append({"round_num": rnd, "side": SIDE[side], "equipment_value": 20000, "buy_type": "full", "n_players": 5})
         for t in (fe - 64, fe, fe + 1000, end):  # first one is freeze time: must be dropped
@@ -139,6 +167,11 @@ def make_match(match_id: str, seed: int, n_rounds: int = 24, fb_win_prob: float 
         "bomb": pl.DataFrame(bomb) if bomb else pl.DataFrame(schema={"tick": pl.Int64, "event": pl.String, "bombsite": pl.String}),
         "smokes": pl.DataFrame(smokes),
         "round_economy": pl.DataFrame(econ),
+        "blinds": pl.DataFrame(blinds, schema_overrides={"attacker_steamid": pl.UInt64, "victim_steamid": pl.UInt64}),
+        "grenades": pl.DataFrame(grenades, schema_overrides={"thrower_steamid": pl.UInt64}),
+        "shots": pl.DataFrame(shots, schema_overrides={"steamid": pl.UInt64}),
+        "item_events": pl.DataFrame(items, schema_overrides={"steamid": pl.UInt64,
+                                                             "original_owner_steamid": pl.UInt64}),
         "snapshots": pl.DataFrame(snaps),
     }
     write_bronze_tables(match_id, tables, {"demo_sha256": "synthetic"})
@@ -330,6 +363,68 @@ def test_list_matches_and_read_match_respect_quarantine():
         assert "syn-list" not in list_matches() and "syn-list" in list_matches(include_quarantined=True)
     finally:
         release("syn-list")
+
+
+def test_utility_tables_reach_silver_with_their_contracts():
+    exp = make_match("syn-util", seed=71)
+    s = bronze_to_silver("syn-util", force=True)
+    n = exp["n_rounds"]
+    b, g, sh, ie = s["blinds"], s["grenades"], s["shots"], s["item_events"]
+    for name, df in (("blinds", b), ("grenades", g), ("shots", sh), ("item_events", ie)):
+        assert list(df.columns) == list(SILVER_SCHEMAS[name]), name
+        assert set(df["round_num"]) == set(range(1, n + 1)), name
+
+    # Three flashes a round: one enemy, one self, one team-mate.
+    assert len(b) == 3 * n
+    assert b["is_self_flash"].sum() == n and b["is_team_flash"].sum() == n
+    assert not (b["is_self_flash"] & b["is_team_flash"]).any()
+    assert (b.loc[~b["is_self_flash"] & ~b["is_team_flash"], "duration"] == 2.5).all()
+
+    # One grenade a round, collapsed from three trajectory samples into one throw.
+    assert len(g) == n and (g["n_samples"] == 3).all()
+    assert (g["grenade_type"] == "flashbang").all()
+    assert (g["throw_x"] == 10.0).all() and (g["land_x"] == 12.0).all()   # first and last sample
+    assert (g["end_tick"] > g["start_tick"]).all() and (g["t_end_s"] > g["t_start_s"]).all()
+
+    # Three shots a round, with the shots table's weapon_ prefix removed.
+    assert len(sh) == 3 * n and not sh["weapon"].str.startswith("weapon_").any()
+    assert sh["is_utility"].sum() == n and sh["is_knife"].sum() == n
+    assert set(sh["weapon"]) == {"ak47", "flashbang", "knife_karambit"}
+
+    # Buying happens in freeze time, so item events keep a negative clock; picking up does not.
+    assert len(ie) == 2 * n
+    buys = ie[ie["action"] == "purchase"]
+    assert len(buys) == n and buys["is_freeze_time"].all() and (buys["t_s"] < 0).all()
+    assert (buys["cost"] == 2700).all()
+    picks = ie[ie["action"] == "pickup"]
+    assert not picks["is_freeze_time"].any() and (picks["t_s"] > 0).all()
+
+
+def test_grenade_trajectories_collapse_to_one_row_per_throw():
+    from cs2_pipeline.silver import clean_grenades
+    rounds = pd.DataFrame({"round_num": [1], "start_tick": [0], "freeze_end": [100],
+                           "end_tick": [1000], "official_end_tick": [1100]})
+    raw = pd.DataFrame([
+        # Two throws by the same player, one of them re-using the entity id after it expired.
+        {"tick": 200, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 1.0, "y": 1.0, "z": 1.0},
+        {"tick": 230, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 2.0, "y": 2.0, "z": 2.0},
+        {"tick": 260, "entity_id": 5, "entity_serial": 1, "start_tick": 200, "end_tick": 260,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "smoke",
+         "x": 3.0, "y": 3.0, "z": 3.0},
+        {"tick": 400, "entity_id": 5, "entity_serial": 2, "start_tick": 400, "end_tick": 420,
+         "thrower_steamid": "1", "thrower_name": "p", "thrower_side": "terrorist", "type": "he",
+         "x": 9.0, "y": 9.0, "z": 9.0},
+    ])
+    out = clean_grenades(raw, rounds, {"1": "Alpha"}, 64.0, "m")
+    assert len(out) == 2
+    smoke = out[out["grenade_type"] == "smoke"].iloc[0]
+    assert (smoke["throw_x"], smoke["land_x"], smoke["n_samples"]) == (1.0, 3.0, 3)
+    assert out["thrower_team"].eq("Alpha").all()
+    assert clean_grenades(raw.iloc[0:0], rounds, {}, 64.0, "m").empty
 
 
 def test_silver_is_idempotent():
